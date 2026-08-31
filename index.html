@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SYSTEM // Notes · Tasks · Organize</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-grid">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">●</span>
+      <h1>PERSONAL&nbsp;OS</h1>
+    </div>
+    <nav class="view-switch" role="tablist">
+      <button class="view-btn is-active" data-view="notes" role="tab">01 / NOTES</button>
+      <button class="view-btn" data-view="tasks" role="tab">02 / TASKS</button>
+      <button class="view-btn" data-view="organize" role="tab">03 / ORGANIZE</button>
+    </nav>
+    <div class="status-readout">
+      <span class="label">PROGRESS</span>
+      <span class="light" id="global-light"></span>
+      <span class="mono" id="global-progress">0/0 · 0%</span>
+    </div>
+  </header>
+
+  <aside class="filter-rail">
+    <div class="rail-title">TAGS</div>
+    <div class="tag-list" id="tag-filter-list">
+      <button class="tag-chip is-active" data-tag="all">ALL</button>
+    </div>
+  </aside>
+
+  <main class="content">
+
+    <!-- NOTES VIEW -->
+    <section class="view-panel is-active" id="view-notes">
+      <div class="panel-header">
+        <h2>NOTES</h2>
+        <button class="btn-primary" id="new-note-btn">+ NEW NOTE</button>
+      </div>
+      <div class="grid-cards" id="notes-list"></div>
+    </section>
+
+    <!-- TASKS VIEW -->
+    <section class="view-panel" id="view-tasks">
+      <div class="panel-header">
+        <h2>TASKS</h2>
+        <button class="btn-primary" id="new-task-btn">+ NEW TASK</button>
+      </div>
+      <div class="task-columns">
+        <div class="task-col" data-status="not_started">
+          <div class="col-header"><span class="light off"></span>NOT STARTED <span class="count" id="count-not_started">0</span></div>
+          <div class="col-body" id="col-not_started"></div>
+        </div>
+        <div class="task-col" data-status="in_progress">
+          <div class="col-header"><span class="light accent"></span>IN PROGRESS <span class="count" id="count-in_progress">0</span></div>
+          <div class="col-body" id="col-in_progress"></div>
+        </div>
+        <div class="task-col" data-status="done">
+          <div class="col-header"><span class="light on"></span>DONE <span class="count" id="count-done">0</span></div>
+          <div class="col-body" id="col-done"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ORGANIZE VIEW -->
+    <section class="view-panel" id="view-organize">
+      <div class="panel-header">
+        <h2>ORGANIZE</h2>
+        <div class="tag-input-row">
+          <input type="text" id="new-tag-input" placeholder="NEW TAG NAME" maxlength="24">
+          <button class="btn-primary" id="new-tag-btn">+ ADD TAG</button>
+        </div>
+      </div>
+      <div class="organize-list" id="organize-list"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- EDITOR MODAL -->
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal">
+    <div class="modal-header">
+      <span class="modal-title" id="modal-title">EDIT ITEM</span>
+      <button class="modal-close" id="modal-close">×</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-footer">
+      <button class="btn-danger" id="modal-delete">DELETE</button>
+      <button class="btn-primary" id="modal-save">SAVE</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
