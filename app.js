@@ -24,6 +24,7 @@ const STATUS_ORDER = ['not_started', 'in_progress', 'done'];
 const STATUS_LABEL = { not_started: 'NOT STARTED', in_progress: 'IN PROGRESS', done: 'DONE' };
 const VIEWS = ['notes', 'tasks', 'organize'];
 const TAG_MAX = 24;
+const TOAST_MAX = 3;
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
@@ -31,7 +32,25 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 
 /* Anything read from localStorage or Google Drive is untrusted: it may come
    from an older schema, a hand-edited backup, or a half-written write. Coerce
-   it into shape rather than letting NaN/undefined leak into sorting + render. */
+   it into shape rather than letting NaN/undefined leak into sorting + render.
+
+   Forward compatibility matters here because sync is last-write-wins across
+   devices. If one browser runs a newer version that added a field, an older
+   browser must not strip it and push the lossy copy back to Drive. So unknown
+   keys are carried through untouched, and the highest schema version seen is
+   preserved rather than downgraded. */
+
+const KNOWN_ITEM_FIELDS = ['id', 'title', 'body', 'tagIds', 'createdAt', 'updatedAt', 'pinned', 'status'];
+
+function carryUnknown(raw, target) {
+  Object.keys(raw).forEach(key => {
+    // __proto__ from JSON.parse is an own property; assigning it via spread is
+    // harmless but pointless, and skipping it keeps the object shape obvious.
+    if (key === '__proto__' || KNOWN_ITEM_FIELDS.includes(key)) return;
+    target[key] = raw[key];
+  });
+  return target;
+}
 
 function sanitizeItem(raw, kind) {
   if (!raw || typeof raw !== 'object') return null;
@@ -50,7 +69,7 @@ function sanitizeItem(raw, kind) {
   } else {
     item.status = STATUS_ORDER.includes(raw.status) ? raw.status : 'not_started';
   }
-  return item;
+  return carryUnknown(raw, item);
 }
 
 function sanitizeState(raw) {
@@ -82,8 +101,11 @@ function sanitizeState(raw) {
   tasks.forEach(t => { t.tagIds = dedupeTags(t.tagIds); });
 
   const updatedAt = Number.isFinite(src.meta && src.meta.updatedAt) ? src.meta.updatedAt : 0;
+  const version = Number.isFinite(src.version) && src.version > SCHEMA_VERSION
+    ? src.version
+    : SCHEMA_VERSION;
 
-  return { version: SCHEMA_VERSION, notes, tasks, tags, meta: { updatedAt } };
+  return { version, notes, tasks, tags, meta: { updatedAt } };
 }
 
 let storageAvailable = true;
@@ -129,6 +151,37 @@ function saveState(skipEvent) {
   // still worth pushing to Drive if the user is signed in.
   if (!skipEvent) window.dispatchEvent(new CustomEvent('pos:save', { detail: state }));
   return ok;
+}
+
+/* THE mutation path. The central invariant — every change must stamp
+   meta.updatedAt via saveState(), or it silently loses the next Drive
+   comparison — used to depend on ~15 call sites each remembering to pair
+   saveState() with renderAll(). Funnelling them through here makes forgetting
+   impossible: mutate, persist, repaint, optionally tell the user.
+
+   Deliberately not a whole-state undo snapshot: restoring an entire snapshot
+   would also revert unrelated edits made between the delete and the UNDO tap.
+   Callers that support undo capture the minimum they need (see restoreItems). */
+function commit(mutate, opts = {}) {
+  mutate();
+  saveState();
+  renderAll();
+  if (opts.message) toast(opts.message, opts.toast);
+}
+
+/* Shared undo for "removed N things from a list": splice them back at their
+   original indices, lowest first, so order is preserved even when the list has
+   changed length in the meantime. */
+function restoreItems(getList, removed) {
+  return () => {
+    commit(() => {
+      const list = getList();
+      removed
+        .slice()
+        .sort((a, b) => a.index - b.index)
+        .forEach(({ item, index }) => list.splice(Math.min(index, list.length), 0, item));
+    }, { message: 'Restored.', toast: { duration: 2000 } });
+  };
 }
 
 let state = loadState();
@@ -255,11 +308,14 @@ function toast(message, opts = {}) {
 
   els.toastStack.appendChild(el);
 
-  // Cap the stack so a burst of changes can't cover the UI, but never drop an
-  // undo the user might still want: plain messages are evicted first.
-  while (els.toastStack.children.length > 3) {
-    const victim = els.toastStack.querySelector('.toast:not([data-has-action])')
-      || els.toastStack.firstElementChild;
+  /* Cap the stack so a burst of changes can't cover the UI. Evict the oldest
+     entry, preferring one with no UNDO so a reversible action stays reversible,
+     but never the toast just added — otherwise a genuinely important message
+     ("storage is full") is dropped the instant three undo toasts are on screen. */
+  while (els.toastStack.children.length > TOAST_MAX) {
+    const others = Array.from(els.toastStack.children).filter(t => t !== el);
+    const victim = others.find(t => !t.dataset.hasAction) || others[0];
+    if (!victim) break;
     victim.remove();
   }
 
@@ -317,15 +373,20 @@ const dialogStack = [];
 const FOCUSABLE = 'button:not([disabled]), input:not([disabled]), textarea, select, a[href], [tabindex]:not([tabindex="-1"])';
 
 function openDialog(backdrop, opts = {}) {
-  const entry = {
+  // Guard against the same dialog being pushed twice: there is only one
+  // element per dialog, so a duplicate entry could never be popped and would
+  // permanently wedge the stack (killing Esc and all keyboard shortcuts).
+  if (dialogStack.some(d => d.backdrop === backdrop)) return false;
+
+  dialogStack.push({
     backdrop,
     restore: document.activeElement,
     onClose: opts.onClose || null,
-  };
-  dialogStack.push(entry);
+  });
   backdrop.classList.add('is-active');
   const target = opts.focus || backdrop.querySelector(FOCUSABLE);
   if (target) target.focus();
+  return true;
 }
 
 function closeDialog(backdrop) {
@@ -333,8 +394,22 @@ function closeDialog(backdrop) {
   if (idx === -1) return;
   const [entry] = dialogStack.splice(idx, 1);
   backdrop.classList.remove('is-active');
+
+  /* Focus must not be left inside a now-hidden dialog. If it is, every
+     keyboard shortcut dies, because isTyping() sees the stranded field and
+     assumes the user is typing. Browsers usually reset this when the element
+     becomes display:none, but only if it was the active element at that
+     moment — restoring to a non-focusable opener (e.g. document.body after a
+     keyboard shortcut) leaves it behind. Blur explicitly. */
+  if (backdrop.contains(document.activeElement)) document.activeElement.blur();
+
   if (entry.onClose) entry.onClose();
-  if (entry.restore && document.contains(entry.restore)) entry.restore.focus();
+
+  const restore = entry.restore;
+  if (restore && document.contains(restore) && typeof restore.focus === 'function'
+      && !backdrop.contains(restore)) {
+    restore.focus();
+  }
 }
 
 function topDialog() {
@@ -359,8 +434,16 @@ function requestClose(backdrop) {
 let confirmResolver = null;
 
 /* Returns a promise so callers read like the old confirm() but get a real,
-   themed, keyboard-accessible dialog that can explain the consequences. */
+   themed, keyboard-accessible dialog that can explain the consequences.
+
+   There is exactly one confirm element, so overlapping calls (a double-click
+   on DELETE, or a second destructive action while the first is still asking)
+   must be rejected rather than stacked. Stacking pushed a second entry onto
+   dialogStack that nothing could ever pop, which left every keyboard shortcut
+   dead for the rest of the session. */
 function confirmAction({ title = 'CONFIRM', message, detail = [], okLabel = 'DELETE', danger = true }) {
+  if (confirmResolver) return Promise.resolve(false);
+
   els.confirmTitle.textContent = title;
   els.confirmMessage.textContent = message;
 
@@ -380,16 +463,22 @@ function confirmAction({ title = 'CONFIRM', message, detail = [], okLabel = 'DEL
     // Focus lands on CANCEL so a stray Enter never destroys anything.
     openDialog(els.confirmBackdrop, {
       focus: els.confirmCancel,
-      onClose: () => { if (confirmResolver) { const r = confirmResolver; confirmResolver = null; r(false); } },
+      // Covers closes that bypass resolveConfirm (e.g. Esc handled elsewhere).
+      onClose: () => {
+        const pending = confirmResolver;
+        confirmResolver = null;
+        if (pending) pending(false);
+      },
     });
   });
 }
 
 function resolveConfirm(value) {
+  if (!confirmResolver) return;
   const resolver = confirmResolver;
-  confirmResolver = null;
+  confirmResolver = null;   // cleared first so onClose does not double-resolve
   closeDialog(els.confirmBackdrop);
-  if (resolver) resolver(value);
+  resolver(value);
 }
 
 els.confirmOk.addEventListener('click', () => resolveConfirm(true));
@@ -472,7 +561,7 @@ function matchesSearch(item) {
   if (`${item.title} ${item.body}`.toLowerCase().includes(q)) return true;
   // Searching a tag name should surface everything carrying that tag.
   return (item.tagIds || []).some(id => {
-    const tag = state.tags.find(t => t.id === id);
+    const tag = tagsById.get(id);
     return tag && tag.name.toLowerCase().includes(q);
   });
 }
@@ -481,14 +570,31 @@ function visible(item) {
   return matchesTag(item) && matchesSearch(item);
 }
 
-/* Highlight runs on already-escaped text, and the needle is escaped the same
-   way, so markup can never be injected through the search box. */
+/* Case-insensitive match positions in the RAW string, so highlighting can
+   escape each segment independently.
+
+   Doing it the other way round — escaping first, then regexing — lets a query
+   like "amp;" match inside the entity produced by escaping "&", splitting
+   `&amp;` into `&` + `<mark>amp;</mark>` and rendering a literal "&amp;".
+   Never run the needle over escaped output. */
 function highlight(text) {
-  const escaped = escapeHtml(text);
-  if (!searchQuery) return escaped;
-  const needle = escapeHtml(searchQuery).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (!needle) return escaped;
-  return escaped.replace(new RegExp(needle, 'gi'), m => `<mark>${m}</mark>`);
+  const raw = String(text);
+  if (!searchQuery) return escapeHtml(raw);
+
+  const haystack = raw.toLowerCase();
+  const needle = searchQuery.toLowerCase();
+  if (!needle) return escapeHtml(raw);
+
+  let out = '';
+  let cursor = 0;
+  for (;;) {
+    const at = haystack.indexOf(needle, cursor);
+    if (at === -1) break;
+    out += escapeHtml(raw.slice(cursor, at));
+    out += `<mark>${escapeHtml(raw.slice(at, at + needle.length))}</mark>`;
+    cursor = at + needle.length;
+  }
+  return out + escapeHtml(raw.slice(cursor));
 }
 
 function truncate(str, max) {
@@ -498,53 +604,55 @@ function truncate(str, max) {
 
 /* ---------- Tag filter rail -------------------------------------------- */
 
-function countFor(tagId) {
-  const hit = item => tagId === 'untagged'
-    ? (item.tagIds || []).length === 0
-    : (item.tagIds || []).includes(tagId);
-  return state.notes.filter(hit).length + state.tasks.filter(hit).length;
+function chipHtml(id, label, count) {
+  const on = activeTagFilter === id;
+  return `<button type="button" class="tag-chip${on ? ' is-active' : ''}" data-filter="${escapeAttr(id)}"` +
+         ` aria-pressed="${on}"><span>${escapeHtml(label)}</span>` +
+         `<span class="chip-count mono">${count}</span></button>`;
 }
 
 function renderTagFilterRail() {
-  els.tagFilterList.innerHTML = '';
+  const chips = [chipHtml('all', 'ALL', state.notes.length + state.tasks.length)];
 
-  const addChip = (id, label, count) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'tag-chip' + (activeTagFilter === id ? ' is-active' : '');
-    btn.setAttribute('aria-pressed', String(activeTagFilter === id));
-    btn.innerHTML = `<span>${escapeHtml(label)}</span><span class="chip-count mono">${count}</span>`;
-    btn.addEventListener('click', () => {
-      // Clicking the active filter clears it — fewer clicks to get back to ALL.
-      activeTagFilter = activeTagFilter === id ? 'all' : id;
-      renderAll();
-    });
-    els.tagFilterList.appendChild(btn);
-  };
+  state.tags.forEach(tag => {
+    const u = tagUsage.get(tag.id) || { notes: 0, tasks: 0 };
+    chips.push(chipHtml(tag.id, tag.name.toUpperCase(), u.notes + u.tasks));
+  });
 
-  const total = state.notes.length + state.tasks.length;
-  const allBtn = document.createElement('button');
-  allBtn.type = 'button';
-  allBtn.className = 'tag-chip' + (activeTagFilter === 'all' ? ' is-active' : '');
-  allBtn.setAttribute('aria-pressed', String(activeTagFilter === 'all'));
-  allBtn.innerHTML = `<span>ALL</span><span class="chip-count mono">${total}</span>`;
-  allBtn.addEventListener('click', () => { activeTagFilter = 'all'; renderAll(); });
-  els.tagFilterList.appendChild(allBtn);
+  if (untaggedCount > 0 && state.tags.length > 0) {
+    chips.push(chipHtml('untagged', 'UNTAGGED', untaggedCount));
+  }
 
-  state.tags.forEach(tag => addChip(tag.id, tag.name.toUpperCase(), countFor(tag.id)));
-
-  const untagged = countFor('untagged');
-  if (untagged > 0 && state.tags.length > 0) addChip('untagged', 'UNTAGGED', untagged);
+  els.tagFilterList.innerHTML = chips.join('');
 }
+
+els.tagFilterList.addEventListener('click', e => {
+  const btn = e.target.closest('[data-filter]');
+  if (!btn) return;
+  const id = btn.dataset.filter;
+  // Clicking the active filter clears it — fewer clicks to get back to ALL.
+  activeTagFilter = (id !== 'all' && activeTagFilter === id) ? 'all' : id;
+  renderAll();
+});
 
 /* ---------- Notes ------------------------------------------------------- */
 
+/* One innerHTML write for the whole list plus one delegated listener, instead
+   of createElement + innerHTML + addEventListener per card. With a few hundred
+   notes the per-card version spent most of a repaint in the HTML parser. */
+function noteCardHtml(note) {
+  return `
+    <div class="card" role="button" tabindex="0" data-note-id="${escapeAttr(note.id)}"
+         aria-label="Edit note: ${escapeAttr(note.title || 'untitled')}">
+      <div class="card-title">${note.pinned ? '<span aria-hidden="true">★ </span>' : ''}${highlight(note.title || 'UNTITLED')}</div>
+      <div class="card-body">${highlight(truncate(note.body || '', 260))}</div>
+      <div class="card-tags">${renderTagPills(note.tagIds)}</div>
+      <div class="card-meta">${escapeHtml(formatDate(note.updatedAt))}</div>
+    </div>`;
+}
+
 function renderNotes() {
   const filtered = state.notes.filter(visible);
-  els.notesList.innerHTML = '';
-  els.notesCount.textContent = searchQuery || activeTagFilter !== 'all'
-    ? `${filtered.length}/${state.notes.length}`
-    : String(state.notes.length);
 
   if (filtered.length === 0) {
     els.notesList.innerHTML = state.notes.length === 0
@@ -553,116 +661,134 @@ function renderNotes() {
     return;
   }
 
-  filtered
+  els.notesList.innerHTML = filtered
     .slice()
     // Pinned first, then most recently touched.
     .sort((a, b) => (b.pinned === true) - (a.pinned === true) || b.updatedAt - a.updatedAt)
-    .forEach(note => {
-      // role=button rather than <button>: a real button may only contain
-      // phrasing content, and these cards contain block-level rows.
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.tabIndex = 0;
-      card.setAttribute('role', 'button');
-      card.setAttribute('aria-label', `Edit note: ${note.title || 'untitled'}`);
-      card.innerHTML = `
-        <div class="card-title">${note.pinned ? '<span aria-hidden="true">★ </span>' : ''}${highlight(note.title || 'UNTITLED')}</div>
-        <div class="card-body">${highlight(truncate(note.body || '', 260))}</div>
-        <div class="card-tags">${renderTagPills(note.tagIds)}</div>
-        <div class="card-meta">${escapeHtml(formatDate(note.updatedAt))}</div>
-      `;
-      card.addEventListener('click', () => openNoteModal(note.id));
-      card.addEventListener('keydown', e => {
-        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
-          e.preventDefault();
-          openNoteModal(note.id);
-        }
-      });
-      els.notesList.appendChild(card);
-    });
+    .map(noteCardHtml)
+    .join('');
 }
+
+/* Delegated once at startup — survives every re-render. */
+els.notesList.addEventListener('click', e => {
+  const card = e.target.closest('[data-note-id]');
+  if (card) openNoteModal(card.dataset.noteId);
+});
+
+els.notesList.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+  const card = e.target.closest('[data-note-id]');
+  if (!card) return;
+  e.preventDefault();
+  openNoteModal(card.dataset.noteId);
+});
 
 /* ---------- Tasks ------------------------------------------------------- */
 
+/* role="group" + an inner title button, NOT role="button" on the card: a
+   button may not contain other interactive controls, and this card owns three
+   status buttons. The title button is the edit affordance, so Enter/Space work
+   natively; Arrow keys move status, which no button consumes. */
+function taskCardHtml(task) {
+  const dots = STATUS_ORDER.map(s =>
+    `<button type="button" class="status-dot${s === task.status ? ' is-current' : ''}" data-status="${s}"` +
+    ` title="Move to ${STATUS_LABEL[s]}" aria-label="Move to ${STATUS_LABEL[s]}"` +
+    `${s === task.status ? ' aria-current="true"' : ''}></button>`).join('');
+
+  return `
+    <div class="task-card${task.status === 'done' ? ' is-done' : ''}" draggable="true"
+         role="group" data-task-id="${escapeAttr(task.id)}"
+         aria-label="${escapeAttr(`${task.title || 'Untitled'} — ${STATUS_LABEL[task.status]}`)}">
+      <button type="button" class="task-open">${highlight(task.title || 'UNTITLED')}</button>
+      ${task.body ? `<div class="card-meta">${highlight(truncate(task.body, 90))}</div>` : ''}
+      <div class="task-card-foot">
+        <div class="card-tags">${renderTagPills(task.tagIds)}</div>
+        <div class="status-select" role="group" aria-label="Status">${dots}</div>
+      </div>
+    </div>`;
+}
+
 function renderTasks() {
   const shown = state.tasks.filter(visible);
-  els.tasksCount.textContent = searchQuery || activeTagFilter !== 'all'
-    ? `${shown.length}/${state.tasks.length}`
-    : String(state.tasks.length);
-  els.clearDoneBtn.hidden = state.tasks.filter(t => t.status === 'done').length === 0;
 
   STATUS_ORDER.forEach(status => {
-    const col = document.getElementById(`col-${status}`);
-    col.innerHTML = '';
-    const items = shown.filter(t => t.status === status);
+    const items = shown
+      .filter(t => t.status === status)
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+
     document.getElementById(`count-${status}`).textContent = items.length;
-
-    if (items.length === 0) {
-      col.innerHTML = '<div class="empty-state">—</div>';
-      return;
-    }
-
-    items
-      .slice()
-      .sort((a, b) => b.updatedAt - a.updatedAt)
-      .forEach(task => {
-        // A div (not a button) because it contains its own status buttons.
-        const card = document.createElement('div');
-        card.className = 'task-card' + (task.status === 'done' ? ' is-done' : '');
-        card.tabIndex = 0;
-        card.draggable = true;
-        card.dataset.taskId = task.id;
-        card.setAttribute('role', 'button');
-        card.setAttribute('aria-label', `${task.title || 'Untitled'} — ${STATUS_LABEL[task.status]}. Enter to edit, Space to advance status.`);
-        card.innerHTML = `
-          <div class="task-title">${highlight(task.title || 'UNTITLED')}</div>
-          ${task.body ? `<div class="card-meta">${highlight(truncate(task.body, 90))}</div>` : ''}
-          <div class="task-card-foot">
-            <div class="card-tags">${renderTagPills(task.tagIds)}</div>
-            <div class="status-select">
-              ${STATUS_ORDER.map(s => `<button type="button" class="status-dot${s === task.status ? ' is-current' : ''}" data-status="${s}" title="Move to ${STATUS_LABEL[s]}" aria-label="Move to ${STATUS_LABEL[s]}"></button>`).join('')}
-            </div>
-          </div>
-        `;
-
-        card.querySelectorAll('.status-dot').forEach(dot => {
-          dot.addEventListener('click', e => {
-            e.stopPropagation();
-            setTaskStatus(task.id, dot.dataset.status);
-          });
-        });
-
-        card.addEventListener('click', () => openTaskModal(task.id));
-        card.addEventListener('keydown', e => {
-          if (e.key === 'Enter') { e.preventDefault(); openTaskModal(task.id); }
-          if (e.key === ' ' || e.key === 'Spacebar') {
-            e.preventDefault();
-            const next = STATUS_ORDER[(STATUS_ORDER.indexOf(task.status) + 1) % STATUS_ORDER.length];
-            setTaskStatus(task.id, next, { keepFocus: task.id });
-          }
-        });
-
-        card.addEventListener('dragstart', e => {
-          e.dataTransfer.setData('text/plain', task.id);
-          e.dataTransfer.effectAllowed = 'move';
-          card.classList.add('is-dragging');
-        });
-        card.addEventListener('dragend', () => card.classList.remove('is-dragging'));
-
-        col.appendChild(card);
-      });
+    document.getElementById(`col-${status}`).innerHTML = items.length === 0
+      ? '<div class="empty-state">—</div>'
+      : items.map(taskCardHtml).join('');
   });
 }
 
+/* Delegated once per column, so re-rendering never re-binds anything. */
 document.querySelectorAll('[data-drop-status]').forEach(zone => {
-  zone.addEventListener('dragover', e => {
+  zone.addEventListener('click', e => {
+    const card = e.target.closest('[data-task-id]');
+    if (!card) return;
+    const id = card.dataset.taskId;
+    const dot = e.target.closest('.status-dot');
+    if (dot) { setTaskStatus(id, dot.dataset.status); return; }
+    if (e.target.closest('.task-open')) openTaskModal(id);
+  });
+
+  // Arrow keys nudge status without stealing Enter/Space from the button.
+  zone.addEventListener('keydown', e => {
+    const delta = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    if (!delta) return;
+    const card = e.target.closest('[data-task-id]');
+    if (!card) return;
+    const task = state.tasks.find(t => t.id === card.dataset.taskId);
+    if (!task) return;
     e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
+    const i = STATUS_ORDER.indexOf(task.status);
+    setTaskStatus(task.id, STATUS_ORDER[(i + delta + STATUS_ORDER.length) % STATUS_ORDER.length],
+      { keepFocus: task.id });
+  });
+
+  zone.addEventListener('dragstart', e => {
+    const card = e.target.closest('[data-task-id]');
+    if (!card) return;
+    e.dataTransfer.setData('text/plain', card.dataset.taskId);
+    e.dataTransfer.effectAllowed = 'move';
+    card.classList.add('is-dragging');
+  });
+
+  zone.addEventListener('dragend', e => {
+    const card = e.target.closest('[data-task-id]');
+    if (card) card.classList.remove('is-dragging');
+    // A drag cancelled with Esc fires no drop, so clear every highlight.
+    document.querySelectorAll('.is-drop-target')
+      .forEach(z => z.classList.remove('is-drop-target'));
+  });
+
+  // dragenter/dragleave fire for every descendant, so a plain dragleave
+  // handler unlights the column the moment the pointer crosses onto a card
+  // inside it. Count enters/leaves instead of trusting a single event.
+  let depth = 0;
+
+  zone.addEventListener('dragenter', e => {
+    e.preventDefault();
+    depth++;
     zone.classList.add('is-drop-target');
   });
-  zone.addEventListener('dragleave', () => zone.classList.remove('is-drop-target'));
+
+  zone.addEventListener('dragover', e => {
+    e.preventDefault();                       // required to allow the drop
+    e.dataTransfer.dropEffect = 'move';
+    zone.classList.add('is-drop-target');     // covers a missed dragenter
+  });
+
+  zone.addEventListener('dragleave', () => {
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) zone.classList.remove('is-drop-target');
+  });
+
   zone.addEventListener('drop', e => {
     e.preventDefault();
+    depth = 0;
     zone.classList.remove('is-drop-target');
     const id = e.dataTransfer.getData('text/plain');
     if (id) setTaskStatus(id, zone.dataset.dropStatus);
@@ -672,12 +798,16 @@ document.querySelectorAll('[data-drop-status]').forEach(zone => {
 function setTaskStatus(id, status, opts = {}) {
   const task = state.tasks.find(t => t.id === id);
   if (!task || !STATUS_ORDER.includes(status) || task.status === status) return;
-  task.status = status;
-  task.updatedAt = Date.now();
-  saveState();
-  renderAll();
+
+  commit(() => {
+    task.status = status;
+    task.updatedAt = Date.now();
+  });
+
   if (opts.keepFocus) {
-    const again = document.querySelector(`.task-card[data-task-id="${opts.keepFocus}"]`);
+    // renderAll() replaced the card, so re-focus the rebuilt one. The card
+    // itself is not focusable; its title button is.
+    const again = document.querySelector(`.task-card[data-task-id="${opts.keepFocus}"] .task-open`);
     if (again) again.focus();
   }
 }
@@ -685,6 +815,7 @@ function setTaskStatus(id, status, opts = {}) {
 els.clearDoneBtn.addEventListener('click', async () => {
   const done = state.tasks.filter(t => t.status === 'done');
   if (done.length === 0) return;
+
   const ok = await confirmAction({
     title: 'CLEAR DONE',
     message: `Delete ${plural(done.length, 'completed task').toLowerCase()}?`,
@@ -693,30 +824,50 @@ els.clearDoneBtn.addEventListener('click', async () => {
     okLabel: 'DELETE THEM',
   });
   if (!ok) return;
-  const snapshot = done.map(t => ({ item: t, index: state.tasks.indexOf(t) }));
-  state.tasks = state.tasks.filter(t => t.status !== 'done');
-  saveState();
-  renderAll();
-  toast(`Deleted ${plural(done.length, 'task').toLowerCase()}.`, {
-    actionLabel: 'UNDO',
-    duration: 8000,
-    onAction: () => {
-      snapshot.sort((a, b) => a.index - b.index).forEach(({ item, index }) => {
-        state.tasks.splice(Math.min(index, state.tasks.length), 0, item);
-      });
-      saveState();
-      renderAll();
-      toast('Restored.', { duration: 2000 });
+
+  const removed = done.map(t => ({ item: t, index: state.tasks.indexOf(t) }));
+
+  commit(() => { state.tasks = state.tasks.filter(t => t.status !== 'done'); }, {
+    message: `Deleted ${plural(done.length, 'task').toLowerCase()}.`,
+    toast: {
+      actionLabel: 'UNDO',
+      duration: 8000,
+      onAction: restoreItems(() => state.tasks, removed),
     },
   });
 });
 
 /* ---------- Tag pills / picker (shared by notes + tasks) ---------------- */
 
+/* Rebuilt once per render pass. Without these, every pill did a linear
+   state.tags.find() and every tag row/chip re-scanned all notes and tasks,
+   making a full repaint O(items x tags). */
+let tagsById = new Map();
+let tagUsage = new Map();   // tagId -> { notes, tasks }
+let untaggedCount = 0;
+
+function refreshTagIndex() {
+  tagsById = new Map(state.tags.map(t => [t.id, t]));
+
+  tagUsage = new Map(state.tags.map(t => [t.id, { notes: 0, tasks: 0 }]));
+  untaggedCount = 0;
+
+  const tally = (items, key) => items.forEach(item => {
+    if (item.tagIds.length === 0) { untaggedCount++; return; }
+    item.tagIds.forEach(id => {
+      const entry = tagUsage.get(id);
+      if (entry) entry[key]++;
+    });
+  });
+
+  tally(state.notes, 'notes');
+  tally(state.tasks, 'tasks');
+}
+
 function renderTagPills(tagIds) {
   if (!tagIds || tagIds.length === 0) return '';
   return tagIds
-    .map(id => state.tags.find(t => t.id === id))
+    .map(id => tagsById.get(id))
     .filter(Boolean)
     .map(t => `<span class="pill">${escapeHtml(t.name.toUpperCase())}</span>`)
     .join('');
@@ -921,41 +1072,43 @@ function saveFromEditor() {
   }
 
   const isNew = !modalContext.id;
+  const kind = modalContext.type === 'note' ? 'Note' : 'Task';
+  const list = modalContext.type === 'note' ? state.notes : state.tasks;
+  const existing = isNew ? null : list.find(i => i.id === modalContext.id);
+
+  /* The item can vanish mid-edit: another tab deleted it, or a Drive pull
+     replaced the whole state. Never throw the typed text away — re-create the
+     item with its original id and say so. */
+  const recovered = !isNew && !existing;
 
   if (modalContext.type === 'note') {
-    if (isNew) {
-      state.notes.push({ id: uid(), title, body, tagIds, pinned: modalContext.pinned === true, createdAt: now, updatedAt: now });
-    } else {
-      const note = state.notes.find(n => n.id === modalContext.id);
-      if (!note) { closeDialog(els.modalBackdrop); return; }
-      Object.assign(note, { title, body, tagIds, pinned: modalContext.pinned === true, updatedAt: now });
-    }
+    const fields = { title, body, tagIds, pinned: modalContext.pinned === true, updatedAt: now };
+    if (existing) Object.assign(existing, fields);
+    else state.notes.push({ id: modalContext.id || uid(), createdAt: now, ...fields });
   } else {
     const status = STATUS_ORDER.includes(modalContext.status) ? modalContext.status : 'not_started';
-    if (isNew) {
-      state.tasks.push({ id: uid(), title, body, tagIds, status, createdAt: now, updatedAt: now });
-    } else {
-      const task = state.tasks.find(t => t.id === modalContext.id);
-      if (!task) { closeDialog(els.modalBackdrop); return; }
-      Object.assign(task, { title, body, tagIds, status, updatedAt: now });
-    }
+    const fields = { title, body, tagIds, status, updatedAt: now };
+    if (existing) Object.assign(existing, fields);
+    else state.tasks.push({ id: modalContext.id || uid(), createdAt: now, ...fields });
   }
 
-  const kind = modalContext.type === 'note' ? 'Note' : 'Task';
   snapshotEditor(); // prevents the dirty prompt on the way out
-  saveState();
   closeDialog(els.modalBackdrop);
-  renderAll();
-  toast(`${kind} ${isNew ? 'created' : 'saved'}.`, { duration: 2500 });
+  commit(() => {}, {
+    message: recovered
+      ? `${kind} had been deleted elsewhere — restored it with your changes.`
+      : `${kind} ${isNew ? 'created' : 'saved'}.`,
+    toast: { duration: recovered ? 7000 : 2500 },
+  });
 }
 
 els.modalDelete.addEventListener('click', async () => {
   if (!modalContext || !modalContext.id) return;
   const { type, id } = modalContext;
-  const list = type === 'note' ? state.notes : state.tasks;
-  const index = list.findIndex(i => i.id === id);
+  const listOf = () => (type === 'note' ? state.notes : state.tasks);
+  const index = listOf().findIndex(i => i.id === id);
   if (index === -1) return;
-  const item = list[index];
+  const item = listOf()[index];
 
   const ok = await confirmAction({
     title: type === 'note' ? 'DELETE NOTE' : 'DELETE TASK',
@@ -968,21 +1121,15 @@ els.modalDelete.addEventListener('click', async () => {
   });
   if (!ok) return;
 
-  list.splice(index, 1);
   snapshotEditor();
-  saveState();
   closeDialog(els.modalBackdrop);
-  renderAll();
 
-  toast(`${type === 'note' ? 'Note' : 'Task'} deleted.`, {
-    actionLabel: 'UNDO',
-    duration: 8000,
-    onAction: () => {
-      const target = type === 'note' ? state.notes : state.tasks;
-      target.splice(Math.min(index, target.length), 0, item);
-      saveState();
-      renderAll();
-      toast('Restored.', { duration: 2000 });
+  commit(() => { listOf().splice(index, 1); }, {
+    message: `${type === 'note' ? 'Note' : 'Task'} deleted.`,
+    toast: {
+      actionLabel: 'UNDO',
+      duration: 8000,
+      onAction: restoreItems(listOf, [{ item, index }]),
     },
   });
 });
@@ -993,52 +1140,62 @@ els.newTaskBtn.addEventListener('click', () => openTaskModal(null));
 /* ---------- Organize: tag CRUD ----------------------------------------- */
 
 function renderOrganize() {
-  els.organizeList.innerHTML = '';
   if (state.tags.length === 0) {
     els.organizeList.innerHTML = '<div class="empty-state">NO TAGS YET<span class="empty-hint">TAGS GROUP NOTES AND TASKS TOGETHER</span></div>';
     return;
   }
 
-  state.tags.forEach(tag => {
-    const noteCount = state.notes.filter(n => n.tagIds.includes(tag.id)).length;
-    const taskCount = state.tasks.filter(t => t.tagIds.includes(tag.id)).length;
-    const row = document.createElement('div');
-    row.className = 'organize-row';
-    row.innerHTML = `
-      <span class="tag-name" contenteditable="true" spellcheck="false" role="textbox"
-            aria-label="Rename tag ${escapeAttr(tag.name)}">${escapeHtml(tag.name.toUpperCase())}</span>
-      <span class="tag-stats">${noteCount} NOTES · ${taskCount} TASKS</span>
-      <span class="tag-actions"><button type="button">DELETE</button></span>
-    `;
-
-    // Inline rename: commit on blur or Enter, revert on Escape.
-    const nameEl = row.querySelector('.tag-name');
-    const commit = () => {
-      const next = nameEl.textContent.trim().slice(0, TAG_MAX);
-      if (!next || next.toUpperCase() === tag.name.toUpperCase()) {
-        nameEl.textContent = tag.name.toUpperCase();
-        return;
-      }
-      if (state.tags.some(t => t.id !== tag.id && t.name.toLowerCase() === next.toLowerCase())) {
-        toast(`A tag named "${next}" already exists.`);
-        nameEl.textContent = tag.name.toUpperCase();
-        return;
-      }
-      tag.name = next;
-      saveState();
-      renderAll();
-      toast('Tag renamed.', { duration: 2000 });
-    };
-    nameEl.addEventListener('blur', commit);
-    nameEl.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); nameEl.blur(); }
-      if (e.key === 'Escape') { nameEl.textContent = tag.name.toUpperCase(); nameEl.blur(); }
-    });
-
-    row.querySelector('button').addEventListener('click', () => deleteTag(tag.id));
-    els.organizeList.appendChild(row);
-  });
+  els.organizeList.innerHTML = state.tags.map(tag => {
+    const u = tagUsage.get(tag.id) || { notes: 0, tasks: 0 };
+    return `
+      <div class="organize-row" data-tag-id="${escapeAttr(tag.id)}">
+        <span class="tag-name" contenteditable="true" spellcheck="false" role="textbox"
+              aria-label="Rename tag ${escapeAttr(tag.name)}">${escapeHtml(tag.name.toUpperCase())}</span>
+        <span class="tag-stats">${u.notes} NOTES · ${u.tasks} TASKS</span>
+        <span class="tag-actions"><button type="button" class="tag-delete">DELETE</button></span>
+      </div>`;
+  }).join('');
 }
+
+/* Delegated once. Inline rename saves on blur or Enter and reverts on Escape;
+   the DOM is the draft, `state` is only touched on a successful commit. */
+function tagFromEvent(e) {
+  const row = e.target.closest('[data-tag-id]');
+  if (!row) return null;
+  return state.tags.find(t => t.id === row.dataset.tagId) || null;
+}
+
+function commitRename(nameEl, tag) {
+  const next = nameEl.textContent.trim().slice(0, TAG_MAX);
+  const revert = () => { nameEl.textContent = tag.name.toUpperCase(); };
+
+  if (!next || next.toUpperCase() === tag.name.toUpperCase()) return revert();
+  if (state.tags.some(t => t.id !== tag.id && t.name.toLowerCase() === next.toLowerCase())) {
+    toast(`A tag named "${next}" already exists.`);
+    return revert();
+  }
+  commit(() => { tag.name = next; }, { message: 'Tag renamed.', toast: { duration: 2000 } });
+}
+
+els.organizeList.addEventListener('click', e => {
+  if (!e.target.closest('.tag-delete')) return;
+  const tag = tagFromEvent(e);
+  if (tag) deleteTag(tag.id);
+});
+
+els.organizeList.addEventListener('focusout', e => {
+  if (!e.target.classList.contains('tag-name')) return;
+  const tag = tagFromEvent(e);
+  if (tag) commitRename(e.target, tag);
+});
+
+els.organizeList.addEventListener('keydown', e => {
+  if (!e.target.classList.contains('tag-name')) return;
+  const tag = tagFromEvent(e);
+  if (!tag) return;
+  if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }
+  if (e.key === 'Escape') { e.target.textContent = tag.name.toUpperCase(); e.target.blur(); }
+});
 
 async function deleteTag(id) {
   const tag = state.tags.find(t => t.id === id);
@@ -1058,32 +1215,28 @@ async function deleteTag(id) {
   if (!ok) return;
 
   const index = state.tags.indexOf(tag);
-  const affectedNotes = state.notes.filter(n => n.tagIds.includes(id)).map(n => n.id);
-  const affectedTasks = state.tasks.filter(t => t.tagIds.includes(id)).map(t => t.id);
+  // Remember only which items referenced the tag, so undo cannot resurrect
+  // unrelated edits made while the toast was on screen.
+  const affected = [...state.notes, ...state.tasks]
+    .filter(i => i.tagIds.includes(id))
+    .map(i => i.id);
 
-  state.tags.splice(index, 1);
-  state.notes.forEach(n => { n.tagIds = n.tagIds.filter(t => t !== id); });
-  state.tasks.forEach(t => { t.tagIds = t.tagIds.filter(x => x !== id); });
-  if (activeTagFilter === id) activeTagFilter = 'all';
-  saveState();
-  renderAll();
-
-  toast(`Tag "${tag.name}" deleted.`, {
-    actionLabel: 'UNDO',
-    duration: 8000,
-    onAction: () => {
-      state.tags.splice(Math.min(index, state.tags.length), 0, tag);
-      affectedNotes.forEach(nid => {
-        const n = state.notes.find(x => x.id === nid);
-        if (n && !n.tagIds.includes(id)) n.tagIds.push(id);
-      });
-      affectedTasks.forEach(tid => {
-        const t = state.tasks.find(x => x.id === tid);
-        if (t && !t.tagIds.includes(id)) t.tagIds.push(id);
-      });
-      saveState();
-      renderAll();
-      toast('Restored.', { duration: 2000 });
+  commit(() => {
+    state.tags.splice(index, 1);
+    state.notes.forEach(n => { n.tagIds = n.tagIds.filter(t => t !== id); });
+    state.tasks.forEach(t => { t.tagIds = t.tagIds.filter(t2 => t2 !== id); });
+    if (activeTagFilter === id) activeTagFilter = 'all';
+  }, {
+    message: `Tag "${tag.name}" deleted.`,
+    toast: {
+      actionLabel: 'UNDO',
+      duration: 8000,
+      onAction: () => commit(() => {
+        state.tags.splice(Math.min(index, state.tags.length), 0, tag);
+        [...state.notes, ...state.tasks].forEach(item => {
+          if (affected.includes(item.id) && !item.tagIds.includes(id)) item.tagIds.push(id);
+        });
+      }, { message: 'Restored.', toast: { duration: 2000 } }),
     },
   });
 }
@@ -1096,10 +1249,8 @@ function addTag() {
     els.newTagInput.select();
     return;
   }
-  state.tags.push({ id: uid(), name });
   els.newTagInput.value = '';
-  saveState();
-  renderAll();
+  commit(() => { state.tags.push({ id: uid(), name }); });
   els.newTagInput.focus();
 }
 
@@ -1154,20 +1305,22 @@ els.importFile.addEventListener('change', async () => {
   });
   if (!ok) return;
 
+  /* Whole-state replacement is the one case where a full snapshot IS the right
+     undo unit: the user asked to swap everything at once. */
   const previous = JSON.parse(JSON.stringify(state));
-  state = incoming;
-  activeTagFilter = 'all';
-  saveState();
-  renderAll();
 
-  toast('Backup imported.', {
-    actionLabel: 'UNDO',
-    duration: 9000,
-    onAction: () => {
-      state = sanitizeState(previous);
-      saveState();
-      renderAll();
-      toast('Reverted to your previous data.', { duration: 3000 });
+  commit(() => {
+    state = incoming;
+    activeTagFilter = 'all';
+  }, {
+    message: 'Backup imported.',
+    toast: {
+      actionLabel: 'UNDO',
+      duration: 9000,
+      onAction: () => commit(() => { state = sanitizeState(previous); }, {
+        message: 'Reverted to your previous data.',
+        toast: { duration: 3000 },
+      }),
     },
   });
 });
@@ -1194,25 +1347,38 @@ els.resetBtn.addEventListener('click', async () => {
   if (!reallyOk) return;
 
   const previous = JSON.parse(JSON.stringify(state));
-  state = sanitizeState(null);
-  activeTagFilter = 'all';
-  clearSearch();
-  saveState();
-  renderAll();
 
-  toast('All data deleted.', {
-    actionLabel: 'UNDO',
-    duration: 10000,
-    onAction: () => {
-      state = sanitizeState(previous);
-      saveState();
-      renderAll();
-      toast('Everything restored.', { duration: 3000 });
+  commit(() => {
+    state = sanitizeState(null);
+    activeTagFilter = 'all';
+    searchQuery = '';
+    els.searchInput.value = '';
+  }, {
+    message: 'All data deleted.',
+    toast: {
+      actionLabel: 'UNDO',
+      duration: 10000,
+      onAction: () => commit(() => { state = sanitizeState(previous); }, {
+        message: 'Everything restored.',
+        toast: { duration: 3000 },
+      }),
     },
   });
 });
 
 /* ---------- Readouts ---------------------------------------------------- */
+
+/* Cheap text updates for chrome that lives in panel headers. Kept out of the
+   panel renderers so switching views never shows a stale count. */
+function renderHeaderCounts() {
+  const filtering = Boolean(searchQuery) || activeTagFilter !== 'all';
+  const shownNotes = filtering ? state.notes.filter(visible).length : state.notes.length;
+  const shownTasks = filtering ? state.tasks.filter(visible).length : state.tasks.length;
+
+  els.notesCount.textContent = filtering ? `${shownNotes}/${state.notes.length}` : String(state.notes.length);
+  els.tasksCount.textContent = filtering ? `${shownTasks}/${state.tasks.length}` : String(state.tasks.length);
+  els.clearDoneBtn.hidden = !state.tasks.some(t => t.status === 'done');
+}
 
 function renderGlobalProgress() {
   const total = state.tasks.length;
@@ -1225,10 +1391,20 @@ function renderGlobalProgress() {
 function renderStats() {
   els.railStats.textContent = `${plural(state.notes.length, 'NOTE')} · ${plural(state.tasks.length, 'TASK')}`;
   if (!els.storageMeta) return;
+
+  if (!storageAvailable) {
+    els.storageMeta.textContent = 'BROWSER STORAGE UNAVAILABLE — CHANGES LAST ONLY FOR THIS SESSION';
+    return;
+  }
+
+  /* Only the ORGANIZE panel shows this, and serialising the whole state to
+     measure it costs more than the rest of a repaint combined at scale.
+     Skip it entirely while the panel is hidden. */
+  if (activeView !== 'organize') return;
+
   const bytes = new Blob([JSON.stringify(state)]).size;
-  els.storageMeta.textContent = storageAvailable
-    ? `LOCAL DATA: ${formatBytes(bytes)} · LAST CHANGE: ${formatDate(state.meta.updatedAt || Date.now())}`
-    : 'BROWSER STORAGE UNAVAILABLE — CHANGES LAST ONLY FOR THIS SESSION';
+  els.storageMeta.textContent =
+    `LOCAL DATA: ${formatBytes(bytes)} · LAST CHANGE: ${formatDate(state.meta.updatedAt || Date.now())}`;
 }
 
 /* ---------- Keyboard shortcuts ----------------------------------------- */
@@ -1304,11 +1480,22 @@ window.addEventListener('storage', e => {
 
 /* ---------- Master render ---------------------------------------------- */
 
+/* Full-redraw rendering is intentional: it is simple and the data set is
+   personal-scale. It is still wasteful to rebuild panels the user cannot see,
+   and worse, doing so moves focus-bearing DOM out from under an open editor.
+   Only the active panel is painted; setView() repaints on switch. Chrome that
+   is always visible (rail, counters) renders every time. */
+const PANEL_RENDERERS = {
+  notes: renderNotes,
+  tasks: renderTasks,
+  organize: renderOrganize,
+};
+
 function renderAll() {
+  refreshTagIndex();
   renderTagFilterRail();
-  renderNotes();
-  renderTasks();
-  renderOrganize();
+  PANEL_RENDERERS[activeView]();
+  renderHeaderCounts();
   renderGlobalProgress();
   renderStats();
 }

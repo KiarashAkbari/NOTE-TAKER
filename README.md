@@ -52,7 +52,7 @@ same data in any browser. Last-write-wins on a single timestamp.
 | `/` | Focus search |
 | `Ctrl`/`⌘` + `Enter` | Save the open editor |
 | `Esc` | Close dialog, or clear search |
-| `Space` | Cycle status of the focused task |
+| `←` `→` | Move the focused task between columns |
 | `Enter` | Open the focused note or task |
 
 ## Running it locally

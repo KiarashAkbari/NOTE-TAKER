@@ -248,6 +248,18 @@ async function downloadRemote(fileId) {
   return res.json();
 }
 
+/* A multipart body is delimited by a plain-text boundary, so the boundary must
+   not appear inside the payload — a note containing it would truncate the
+   upload and silently corrupt the stored file. Pick one that does not collide.
+   (JSON.stringify escapes quotes and newlines but not arbitrary ASCII.) */
+function makeBoundary(payload) {
+  for (let i = 0; i < 8; i++) {
+    const candidate = 'pos-boundary-' + Math.random().toString(36).slice(2) + i.toString(36);
+    if (!payload.includes(candidate)) return candidate;
+  }
+  throw new Error('could not find a safe multipart boundary');
+}
+
 async function uploadRemote(content) {
   // Never create blindly: without this lookup a fresh page load that pushes
   // before it has listed the folder would create a duplicate data file.
@@ -260,10 +272,11 @@ async function uploadRemote(content) {
     ? { name: DRIVE_FILE_NAME }
     : { name: DRIVE_FILE_NAME, parents: ['appDataFolder'] };
 
-  const boundary = 'pos-boundary-' + Math.random().toString(36).slice(2);
+  const payload = JSON.stringify(content);
+  const boundary = makeBoundary(payload);
   const body =
     `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
-    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(content)}\r\n` +
+    `--${boundary}\r\nContent-Type: application/json\r\n\r\n${payload}\r\n` +
     `--${boundary}--`;
 
   const url = remoteFileId
