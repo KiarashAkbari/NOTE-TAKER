@@ -1,8 +1,8 @@
 /* ==========================================================================
    PERSONAL OS — app.js
-   Single-user, single-device, localStorage-backed. No backend, no build step.
-   Data model is intentionally flat/flexible so future phases (AI-assisted
-   organization, etc.) can be layered on without a structural rewrite.
+   Local-first: localStorage is the source of truth for instant reads/writes.
+   sync.js (loaded after this file) hooks into saveState() via the 'pos:save'
+   event to mirror state to Google Drive's appDataFolder when signed in.
    ========================================================================== */
 
 const STORAGE_KEY = 'personal-os-v1';
@@ -12,13 +12,20 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 function loadState() {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (raw) {
-    try { return JSON.parse(raw); } catch (e) { /* fall through to default */ }
+    try {
+      const parsed = JSON.parse(raw);
+      parsed.meta = parsed.meta || { updatedAt: 0 };
+      return parsed;
+    } catch (e) { /* fall through to default */ }
   }
-  return { notes: [], tasks: [], tags: [] };
+  return { notes: [], tasks: [], tags: [], meta: { updatedAt: 0 } };
 }
 
-function saveState() {
+function saveState(skipEvent) {
+  state.meta = state.meta || {};
+  state.meta.updatedAt = Date.now();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (!skipEvent) window.dispatchEvent(new CustomEvent('pos:save', { detail: state }));
 }
 
 let state = loadState();
@@ -400,3 +407,19 @@ function renderAll() {
 }
 
 renderAll();
+
+// ---------- Public hooks for sync.js ----------
+
+window.PersonalOS = {
+  getState: () => state,
+  setState: (newState) => {
+    newState.notes = newState.notes || [];
+    newState.tasks = newState.tasks || [];
+    newState.tags = newState.tags || [];
+    newState.meta = newState.meta || { updatedAt: 0 };
+    state = newState;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    renderAll();
+  },
+  renderAll,
+};
