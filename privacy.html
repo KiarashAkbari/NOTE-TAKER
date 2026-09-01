@@ -1,17 +1,31 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Personal OS — Privacy Policy</title>
+<meta name="color-scheme" content="dark light">
 <link rel="stylesheet" href="style.css">
+<script>
+  /* Same pre-paint theme bootstrap as index.html. Required: every color token
+     lives under html[data-theme], so without this the page renders unstyled. */
+  (function () {
+    try {
+      var pref = localStorage.getItem('pos-theme') || 'system';
+      document.documentElement.dataset.theme = pref === 'system'
+        ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : pref;
+    } catch (e) { /* storage blocked — dark stays */ }
+  })();
+</script>
 <style>
-  body { padding: 40px; max-width: 720px; margin: 0 auto; }
+  body { padding: 40px 24px; max-width: 720px; margin: 0 auto; height: auto; }
   h1 { font-size: 22px; font-weight: 300; margin-bottom: 24px; letter-spacing: 1px; }
   h2 { font-size: 15px; font-weight: 500; margin-top: 28px; margin-bottom: 10px; color: var(--accent); letter-spacing: 0.5px; }
   p, li { font-size: 14px; line-height: 1.7; color: var(--fg-dim); }
   ul { margin-left: 20px; margin-top: 8px; }
   a { color: var(--accent); }
+  code { font-family: var(--font-mono); font-size: 13px; }
   .back { display: inline-block; margin-bottom: 30px; font-family: var(--font-mono); font-size: 11px; letter-spacing: 1px; }
 </style>
 </head>
@@ -21,15 +35,18 @@
   <p>Last updated: September 2026</p>
 
   <h2>WHAT THIS APP IS</h2>
-  <p>Personal OS is a single-user note-taking, task-tracking, and organizing tool. It is built and operated by an individual developer for personal use, and made publicly available as open-source code. It has no company, server, or analytics infrastructure behind it.</p>
+  <p>Personal OS is a single-user note-taking, task-tracking, and organizing tool. It is built and operated by an individual developer for personal use, and made publicly available as open-source code. It is free to use, has no paid tier, and has no company, server, or analytics infrastructure behind it.</p>
 
   <h2>WHAT DATA IS COLLECTED</h2>
-  <p>The app stores the notes, tasks, and tags you create. This data is:</p>
+  <p>The app stores the notes, tasks, and tags you create, plus one small preference (your chosen colour theme). This data is:</p>
   <ul>
     <li>Saved in your browser's local storage on each device by default.</li>
     <li>Optionally, if you choose to sign in with Google, mirrored to a single hidden file in your own Google Drive's "application data" folder — a private storage space that only this app can access, invisible in your normal Drive file list.</li>
   </ul>
   <p>No data is ever sent to any server, third party, or the developer. There is no backend — the app runs entirely in your browser and talks directly to Google's own APIs when you opt into sync.</p>
+
+  <h2>THIRD-PARTY REQUESTS</h2>
+  <p>If you never sign in, the app loads no third-party code and makes no network requests at all. Google's sign-in library is fetched only at the moment you tap SIGN IN, and Google Drive is contacted only while sync is switched on.</p>
 
   <h2>GOOGLE ACCOUNT ACCESS</h2>
   <p>If you sign in with Google, the app requests exactly one permission scope: <code>drive.appdata</code>. This scope allows the app to read and write only its own hidden data file, and grants no access to any other file in your Google Drive, your Gmail, contacts, or any other Google service.</p>
@@ -37,8 +54,11 @@
   <h2>DATA SHARING</h2>
   <p>This app does not share, sell, transmit, or expose your data to any third party, advertiser, or analytics service, because none are integrated into the app.</p>
 
+  <h2>EXPORTING YOUR DATA</h2>
+  <p>The ORGANIZE view has an EXPORT BACKUP button that downloads everything as a plain JSON file, directly from your browser. Nothing is uploaded to produce it, and the same file can be imported back at any time.</p>
+
   <h2>DATA DELETION</h2>
-  <p>You can delete all local data at any time by clearing your browser's site data for this page. You can delete the Drive-stored copy by revoking this app's access at <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google Account → Security → Third-party access</a>, which also deletes the associated app-data file.</p>
+  <p>You can delete everything from inside the app with DELETE ALL DATA in the ORGANIZE view, or by clearing your browser's site data for this page. You can delete the Drive-stored copy by revoking this app's access at <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Google Account → Security → Third-party access</a>, which also deletes the associated app-data file.</p>
 
   <h2>CONTACT</h2>
   <p>For questions about this policy or the app, contact: <a href="mailto:consistentrash@gmail.com">consistentrash@gmail.com</a>.</p>
