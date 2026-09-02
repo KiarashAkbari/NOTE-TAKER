@@ -1,81 +1,147 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SYSTEM // Notes · Tasks · Organize</title>
+<meta name="description" content="Personal OS — a free, local-first notes, tasks and organizing app. No accounts, no servers, no tracking.">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0F0E12" id="meta-theme-color">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230F0E12'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23FF6600'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
+<script>
+  /* Applied before first paint so the chosen theme never flashes.
+     Kept inline and dependency-free on purpose. */
+  (function () {
+    try {
+      var pref = localStorage.getItem('pos-theme') || 'system';
+      var resolved = pref === 'system'
+        ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : pref;
+      document.documentElement.dataset.theme = resolved;
+    } catch (e) { /* private mode / storage blocked — dark stays */ }
+  })();
+</script>
 </head>
 <body>
 <div class="app-grid">
 
   <header class="topbar">
     <div class="brand">
-      <span class="brand-mark">●</span>
+      <span class="brand-mark" aria-hidden="true">●</span>
       <h1>PERSONAL&nbsp;OS</h1>
     </div>
-    <nav class="view-switch" role="tablist">
-      <button class="view-btn is-active" data-view="notes" role="tab">01 / NOTES</button>
-      <button class="view-btn" data-view="tasks" role="tab">02 / TASKS</button>
-      <button class="view-btn" data-view="organize" role="tab">03 / ORGANIZE</button>
+
+    <nav class="view-switch" role="tablist" aria-label="Views">
+      <button type="button" class="view-btn is-active" data-view="notes" role="tab" id="tab-notes"
+              aria-selected="true" aria-controls="view-notes">01 / NOTES</button>
+      <button type="button" class="view-btn" data-view="tasks" role="tab" id="tab-tasks"
+              aria-selected="false" aria-controls="view-tasks" tabindex="-1">02 / TASKS</button>
+      <button type="button" class="view-btn" data-view="organize" role="tab" id="tab-organize"
+              aria-selected="false" aria-controls="view-organize" tabindex="-1">03 / ORGANIZE</button>
     </nav>
-    <div class="status-readout">
-      <span class="label">PROGRESS</span>
-      <span class="light" id="global-light"></span>
-      <span class="mono" id="global-progress">0/0 · 0%</span>
+
+    <div class="topbar-right">
+      <div class="status-readout" title="Completed tasks">
+        <span class="label">PROGRESS</span>
+        <span class="light" id="global-light" aria-hidden="true"></span>
+        <span class="mono" id="global-progress">0/0 · 0%</span>
+      </div>
+
+      <!-- sync.js mounts its readout here -->
+      <div class="status-readout" id="sync-mount"></div>
+
+      <button type="button" class="icon-btn" id="theme-btn" title="Theme: system" aria-label="Change theme, currently system">
+        <span class="mono" id="theme-label">SYS</span>
+      </button>
+
+      <button type="button" class="icon-btn" id="help-btn" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">
+        <span class="mono">?</span>
+      </button>
     </div>
   </header>
 
   <aside class="filter-rail">
-    <div class="rail-title">TAGS</div>
-    <div class="tag-list" id="tag-filter-list">
-      <button class="tag-chip is-active" data-tag="all">ALL</button>
+    <div class="rail-section">
+      <label class="rail-title" for="search-input">FIND</label>
+      <input type="search" id="search-input" class="search-input" placeholder="SEARCH…"
+             autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="rail-section">
+      <div class="rail-title" id="tags-rail-title">TAGS</div>
+      <div class="tag-list" id="tag-filter-list" role="group" aria-labelledby="tags-rail-title"></div>
+    </div>
+
+    <div class="rail-footer">
+      <div class="mono rail-note" id="rail-stats">0 NOTES · 0 TASKS</div>
+      <div class="mono rail-note">100% FREE · NO SERVER</div>
+      <a class="mono rail-note" href="privacy.html">PRIVACY</a>
     </div>
   </aside>
 
   <main class="content">
 
     <!-- NOTES VIEW -->
-    <section class="view-panel is-active" id="view-notes">
+    <section class="view-panel is-active" id="view-notes" role="tabpanel" aria-labelledby="tab-notes" tabindex="0">
       <div class="panel-header">
-        <h2>NOTES</h2>
-        <button class="btn-primary" id="new-note-btn">+ NEW NOTE</button>
+        <h2>NOTES <span class="mono panel-count" id="notes-count">0</span></h2>
+        <button type="button" class="btn-primary" id="new-note-btn">+ NEW NOTE <kbd>N</kbd></button>
       </div>
       <div class="grid-cards" id="notes-list"></div>
     </section>
 
     <!-- TASKS VIEW -->
-    <section class="view-panel" id="view-tasks">
+    <section class="view-panel" id="view-tasks" role="tabpanel" aria-labelledby="tab-tasks" tabindex="0" hidden>
       <div class="panel-header">
-        <h2>TASKS</h2>
-        <button class="btn-primary" id="new-task-btn">+ NEW TASK</button>
+        <h2>TASKS <span class="mono panel-count" id="tasks-count">0</span></h2>
+        <div class="button-row">
+          <button type="button" class="btn-ghost" id="clear-done-btn" hidden>✕ CLEAR DONE</button>
+          <button type="button" class="btn-primary" id="new-task-btn">+ NEW TASK <kbd>T</kbd></button>
+        </div>
       </div>
       <div class="task-columns">
         <div class="task-col" data-status="not_started">
-          <div class="col-header"><span class="light off"></span>NOT STARTED <span class="count" id="count-not_started">0</span></div>
-          <div class="col-body" id="col-not_started"></div>
+          <div class="col-header"><span class="light off" aria-hidden="true"></span>NOT STARTED <span class="count" id="count-not_started">0</span></div>
+          <div class="col-body" id="col-not_started" data-drop-status="not_started"></div>
         </div>
         <div class="task-col" data-status="in_progress">
-          <div class="col-header"><span class="light accent"></span>IN PROGRESS <span class="count" id="count-in_progress">0</span></div>
-          <div class="col-body" id="col-in_progress"></div>
+          <div class="col-header"><span class="light accent" aria-hidden="true"></span>IN PROGRESS <span class="count" id="count-in_progress">0</span></div>
+          <div class="col-body" id="col-in_progress" data-drop-status="in_progress"></div>
         </div>
         <div class="task-col" data-status="done">
-          <div class="col-header"><span class="light on"></span>DONE <span class="count" id="count-done">0</span></div>
-          <div class="col-body" id="col-done"></div>
+          <div class="col-header"><span class="light on" aria-hidden="true"></span>DONE <span class="count" id="count-done">0</span></div>
+          <div class="col-body" id="col-done" data-drop-status="done"></div>
         </div>
       </div>
     </section>
 
     <!-- ORGANIZE VIEW -->
-    <section class="view-panel" id="view-organize">
+    <section class="view-panel" id="view-organize" role="tabpanel" aria-labelledby="tab-organize" tabindex="0" hidden>
       <div class="panel-header">
         <h2>ORGANIZE</h2>
         <div class="tag-input-row">
-          <input type="text" id="new-tag-input" placeholder="NEW TAG NAME" maxlength="24">
-          <button class="btn-primary" id="new-tag-btn">+ ADD TAG</button>
+          <label class="sr-only" for="new-tag-input">New tag name</label>
+          <input type="text" id="new-tag-input" placeholder="NEW TAG NAME" maxlength="24" autocomplete="off">
+          <button type="button" class="btn-primary" id="new-tag-btn">+ ADD TAG</button>
         </div>
       </div>
+
       <div class="organize-list" id="organize-list"></div>
+
+      <div class="section-block">
+        <div class="section-title">DATA · YOURS, ALWAYS</div>
+        <p class="section-note">
+          Everything lives in this browser. Export a full JSON backup any time — no account, no lock-in, no cost.
+        </p>
+        <div class="button-row">
+          <button type="button" class="btn-ghost" id="export-btn">↓ EXPORT BACKUP</button>
+          <button type="button" class="btn-ghost" id="import-btn">↑ IMPORT BACKUP</button>
+          <button type="button" class="btn-danger" id="reset-btn">✕ DELETE ALL DATA</button>
+        </div>
+        <input type="file" id="import-file" accept="application/json,.json" class="sr-only" aria-hidden="true" tabindex="-1">
+        <div class="mono section-meta" id="storage-meta"></div>
+      </div>
     </section>
 
   </main>
@@ -83,20 +149,69 @@
 
 <!-- EDITOR MODAL -->
 <div class="modal-backdrop" id="modal-backdrop">
-  <div class="modal">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-header">
       <span class="modal-title" id="modal-title">EDIT ITEM</span>
-      <button class="modal-close" id="modal-close">×</button>
+      <button type="button" class="modal-close" id="modal-close" aria-label="Close">×</button>
     </div>
-    <div class="modal-body" id="modal-body"></div>
+    <form id="modal-form" novalidate>
+      <div class="modal-body" id="modal-body"></div>
+      <div class="modal-footer">
+        <button type="button" class="btn-danger" id="modal-delete">DELETE</button>
+        <div class="footer-right">
+          <span class="mono hint">⌘/CTRL + ENTER</span>
+          <button type="submit" class="btn-primary" id="modal-save">SAVE</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- CONFIRM DIALOG (replaces native confirm) -->
+<div class="modal-backdrop" id="confirm-backdrop">
+  <div class="modal modal-sm" role="dialog" aria-modal="true"
+       aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <div class="modal-header">
+      <span class="modal-title" id="confirm-title">CONFIRM</span>
+      <button type="button" class="modal-close" id="confirm-close" aria-label="Cancel">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="confirm-message" id="confirm-message"></p>
+      <ul class="confirm-detail" id="confirm-detail" hidden></ul>
+    </div>
     <div class="modal-footer">
-      <button class="btn-danger" id="modal-delete">DELETE</button>
-      <button class="btn-primary" id="modal-save">SAVE</button>
+      <button type="button" class="btn-ghost" id="confirm-cancel">CANCEL</button>
+      <button type="button" class="btn-danger" id="confirm-ok">DELETE</button>
     </div>
   </div>
 </div>
 
-<script src="https://accounts.google.com/gsi/client"></script>
+<!-- SHORTCUTS DIALOG -->
+<div class="modal-backdrop" id="help-backdrop">
+  <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="help-title">
+    <div class="modal-header">
+      <span class="modal-title" id="help-title">KEYBOARD</span>
+      <button type="button" class="modal-close" id="help-close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body">
+      <dl class="shortcut-list">
+        <dt><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd></dt><dd>Switch view</dd>
+        <dt><kbd>N</kbd></dt><dd>New note</dd>
+        <dt><kbd>T</kbd></dt><dd>New task</dd>
+        <dt><kbd>/</kbd></dt><dd>Focus search</dd>
+        <dt><kbd>⌘/Ctrl</kbd> + <kbd>Enter</kbd></dt><dd>Save open editor</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close dialog / clear search</dd>
+        <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Move focused task between columns</dd>
+      </dl>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-primary" id="help-ok">GOT IT</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
+
 <script src="app.js"></script>
 <script src="sync.js"></script>
 </body>
