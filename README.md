@@ -18,7 +18,7 @@ PAYLOAD:          5 STATIC FILES · ~29 KB GZIPPED
 **[ LIVE_SYSTEM ]** → **https://kiarashakbari.github.io/NOTE-TAKER/** ·
 [PRIVACY_POLICY](https://kiarashakbari.github.io/NOTE-TAKER/privacy.html)
 
-![UI_PREVIEW](environment.webm)
+![UI_PREVIEW](environment.gif)
 ---
 
 ## // 01_SYSTEM_OVERVIEW
