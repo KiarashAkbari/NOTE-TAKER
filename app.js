@@ -40,7 +40,7 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
    keys are carried through untouched, and the highest schema version seen is
    preserved rather than downgraded. */
 
-const KNOWN_ITEM_FIELDS = ['id', 'title', 'body', 'tagIds', 'createdAt', 'updatedAt', 'pinned', 'status'];
+const KNOWN_ITEM_FIELDS = ['id', 'title', 'body', 'tagIds', 'createdAt', 'updatedAt', 'pinned', 'status', 'alarmAt', 'alarmLabel'];
 
 function carryUnknown(raw, target) {
   Object.keys(raw).forEach(key => {
@@ -69,6 +69,8 @@ function sanitizeItem(raw, kind) {
   } else {
     item.status = STATUS_ORDER.includes(raw.status) ? raw.status : 'not_started';
   }
+  item.alarmAt = Number.isFinite(raw.alarmAt) ? raw.alarmAt : null;
+  item.alarmLabel = typeof raw.alarmLabel === 'string' ? raw.alarmLabel : '';
   return carryUnknown(raw, item);
 }
 
@@ -641,13 +643,14 @@ els.tagFilterList.addEventListener('click', e => {
    of createElement + innerHTML + addEventListener per card. With a few hundred
    notes the per-card version spent most of a repaint in the HTML parser. */
 function noteCardHtml(note) {
+  const alarmBadge = note.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(note.alarmLabel || 'ALARM')}">⏰</span>` : '';
   return `
     <div class="card" role="button" tabindex="0" data-note-id="${escapeAttr(note.id)}"
          aria-label="Edit note: ${escapeAttr(note.title || 'untitled')}">
       <div class="card-title">${note.pinned ? '<span aria-hidden="true">★ </span>' : ''}${highlight(note.title || 'UNTITLED')}</div>
       <div class="card-body">${highlight(truncate(note.body || '', 260))}</div>
       <div class="card-tags">${renderTagPills(note.tagIds)}</div>
-      <div class="card-meta">${escapeHtml(formatDate(note.updatedAt))}</div>
+      <div class="card-meta">${alarmBadge}${escapeHtml(formatDate(note.updatedAt))}</div>
     </div>`;
 }
 
@@ -695,12 +698,14 @@ function taskCardHtml(task) {
     ` title="Move to ${STATUS_LABEL[s]}" aria-label="Move to ${STATUS_LABEL[s]}"` +
     `${s === task.status ? ' aria-current="true"' : ''}></button>`).join('');
 
+  const alarmBadge = task.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(task.alarmLabel || 'ALARM')}">⏰</span>` : '';
+
   return `
     <div class="task-card${task.status === 'done' ? ' is-done' : ''}" draggable="true"
          role="group" data-task-id="${escapeAttr(task.id)}"
          aria-label="${escapeAttr(`${task.title || 'Untitled'} — ${STATUS_LABEL[task.status]}`)}">
       <button type="button" class="task-open">${highlight(task.title || 'UNTITLED')}</button>
-      ${task.body ? `<div class="card-meta">${highlight(truncate(task.body, 90))}</div>` : ''}
+      ${task.body ? `<div class="card-meta">${alarmBadge}${highlight(truncate(task.body, 90))}</div>` : alarmBadge ? `<div class="card-meta">${alarmBadge}</div>` : ''}
       <div class="task-card-foot">
         <div class="card-tags">${renderTagPills(task.tagIds)}</div>
         <div class="status-select" role="group" aria-label="Status">${dots}</div>
@@ -910,6 +915,9 @@ function openNoteModal(id) {
   els.modalTitle.textContent = id ? 'EDIT NOTE' : 'NEW NOTE';
   els.modalDelete.hidden = !id;
 
+  const alarmVal = note && note.alarmAt ? new Date(note.alarmAt).toISOString().slice(0, 16) : '';
+  const alarmLabel = note && note.alarmLabel ? note.alarmLabel : '';
+
   els.modalBody.innerHTML = `
     <div>
       <label for="field-title">TITLE</label>
@@ -931,6 +939,14 @@ function openNoteModal(id) {
                 aria-pressed="${modalContext.pinned}">★ PIN TO TOP</button>
       </div>
     </div>
+    <div>
+      <label>REMINDER</label>
+      <div class="alarm-row">
+        <input type="datetime-local" id="field-alarm" value="${escapeAttr(alarmVal)}">
+        <input type="text" id="field-alarm-label" value="${escapeAttr(alarmLabel)}" placeholder="Label (optional)" autocomplete="off">
+        <button type="button" class="btn-ghost btn-sm" id="field-calendar" title="Download calendar file">📅 ICS</button>
+      </div>
+    </div>
     ${note ? `<div class="field-meta">CREATED ${escapeHtml(formatDate(note.createdAt))} · UPDATED ${escapeHtml(formatDate(note.updatedAt))}</div>` : ''}
   `;
 
@@ -938,6 +954,23 @@ function openNoteModal(id) {
   pinBtn.addEventListener('click', () => {
     modalContext.pinned = pinBtn.classList.toggle('is-active');
     pinBtn.setAttribute('aria-pressed', String(modalContext.pinned));
+  });
+
+  const calBtn = document.getElementById('field-calendar');
+  calBtn.addEventListener('click', () => {
+    const alarmEl = document.getElementById('field-alarm');
+    const alarmLabelEl = document.getElementById('field-alarm-label');
+    if (alarmEl && alarmEl.value) {
+      downloadICS({
+        id: note ? note.id : '__new__',
+        title: (document.getElementById('field-title') || {}).value || 'Note',
+        body: (document.getElementById('field-body') || {}).value || '',
+        alarmAt: new Date(alarmEl.value).getTime(),
+        alarmLabel: alarmLabelEl ? alarmLabelEl.value : '',
+      });
+    } else {
+      toast('Set a date/time first.', { duration: 3000 });
+    }
   });
 
   attachTagPickerHandlers();
@@ -952,6 +985,9 @@ function openTaskModal(id) {
   modalContext = { type: 'task', id, status: task ? task.status : 'not_started' };
   els.modalTitle.textContent = id ? 'EDIT TASK' : 'NEW TASK';
   els.modalDelete.hidden = !id;
+
+  const alarmVal = task && task.alarmAt ? new Date(task.alarmAt).toISOString().slice(0, 16) : '';
+  const alarmLabel = task && task.alarmLabel ? task.alarmLabel : '';
 
   els.modalBody.innerHTML = `
     <div>
@@ -973,6 +1009,14 @@ function openTaskModal(id) {
       <label>TAGS</label>
       <div class="tag-picker" id="field-tags">${renderTagPicker(task ? task.tagIds : [])}</div>
     </div>
+    <div>
+      <label>REMINDER</label>
+      <div class="alarm-row">
+        <input type="datetime-local" id="field-alarm" value="${escapeAttr(alarmVal)}">
+        <input type="text" id="field-alarm-label" value="${escapeAttr(alarmLabel)}" placeholder="Label (optional)" autocomplete="off">
+        <button type="button" class="btn-ghost btn-sm" id="field-calendar" title="Download calendar file">📅 ICS</button>
+      </div>
+    </div>
     ${task ? `<div class="field-meta">CREATED ${escapeHtml(formatDate(task.createdAt))} · UPDATED ${escapeHtml(formatDate(task.updatedAt))}</div>` : ''}
   `;
 
@@ -987,6 +1031,23 @@ function openTaskModal(id) {
         c.setAttribute('aria-pressed', String(on));
       });
     });
+  });
+
+  const calBtn = document.getElementById('field-calendar');
+  calBtn.addEventListener('click', () => {
+    const alarmEl = document.getElementById('field-alarm');
+    const alarmLabelEl = document.getElementById('field-alarm-label');
+    if (alarmEl && alarmEl.value) {
+      downloadICS({
+        id: task ? task.id : '__new__',
+        title: (document.getElementById('field-title') || {}).value || 'Task',
+        body: (document.getElementById('field-body') || {}).value || '',
+        alarmAt: new Date(alarmEl.value).getTime(),
+        alarmLabel: alarmLabelEl ? alarmLabelEl.value : '',
+      });
+    } else {
+      toast('Set a date/time first.', { duration: 3000 });
+    }
   });
 
   attachTagPickerHandlers();
@@ -1022,6 +1083,8 @@ let editorSnapshot = '';
 function editorFingerprint() {
   const title = document.getElementById('field-title');
   const body = document.getElementById('field-body');
+  const alarm = document.getElementById('field-alarm');
+  const alarmLabel = document.getElementById('field-alarm-label');
   if (!title || !body || !modalContext) return '';
   return JSON.stringify([
     title.value,
@@ -1029,6 +1092,8 @@ function editorFingerprint() {
     getSelectedTagIds().slice().sort(),
     modalContext.status || '',
     modalContext.pinned || false,
+    alarm ? alarm.value : '',
+    alarmLabel ? alarmLabel.value : '',
   ]);
 }
 
@@ -1081,13 +1146,18 @@ function saveFromEditor() {
      item with its original id and say so. */
   const recovered = !isNew && !existing;
 
+  const alarmEl = document.getElementById('field-alarm');
+  const alarmLabelEl = document.getElementById('field-alarm-label');
+  const alarmAt = alarmEl && alarmEl.value ? new Date(alarmEl.value).getTime() : null;
+  const alarmLabel = alarmLabelEl ? alarmLabelEl.value.trim() : '';
+
   if (modalContext.type === 'note') {
-    const fields = { title, body, tagIds, pinned: modalContext.pinned === true, updatedAt: now };
+    const fields = { title, body, tagIds, pinned: modalContext.pinned === true, updatedAt: now, alarmAt, alarmLabel };
     if (existing) Object.assign(existing, fields);
     else state.notes.push({ id: modalContext.id || uid(), createdAt: now, ...fields });
   } else {
     const status = STATUS_ORDER.includes(modalContext.status) ? modalContext.status : 'not_started';
-    const fields = { title, body, tagIds, status, updatedAt: now };
+    const fields = { title, body, tagIds, status, updatedAt: now, alarmAt, alarmLabel };
     if (existing) Object.assign(existing, fields);
     else state.tasks.push({ id: modalContext.id || uid(), createdAt: now, ...fields });
   }
@@ -1473,10 +1543,82 @@ window.addEventListener('storage', e => {
     const incoming = sanitizeState(JSON.parse(e.newValue));
     if ((incoming.meta.updatedAt || 0) <= (state.meta.updatedAt || 0)) return;
     state = incoming;
+    notifiedAlarms.clear();
     renderAll();
     toast('Updated from another tab.', { duration: 2500 });
   } catch (err) { /* ignore malformed cross-tab payloads */ }
 });
+
+/* ---------- Alarm / Reminder + Calendar --------------------------------- */
+let alarmInterval = null;
+let notifiedAlarms = new Set();
+
+function initAlarmCheck() {
+  if ('Notification' in window && Notification.permission === 'default') {
+    document.addEventListener('click', () => { Notification.requestPermission(); }, { once: true });
+  }
+  alarmInterval = setInterval(checkAlarms, 1000);
+}
+
+function checkAlarms() {
+  const now = Date.now();
+  const toFire = [...state.notes, ...state.tasks].filter(
+    item => item.alarmAt && !notifiedAlarms.has(item.id) && item.alarmAt <= now
+  );
+  toFire.forEach(item => {
+    notifiedAlarms.add(item.id);
+    fireAlarm(item);
+    item.alarmAt = null;
+    item.alarmLabel = '';
+    saveState();
+  });
+  if (toFire.length) renderAll();
+}
+
+function fireAlarm(item) {
+  const label = item.alarmLabel || item.title || 'Untitled';
+  const kind = state.notes.includes(item) ? 'Note' : 'Task';
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try { new Notification(`Personal OS: ${label}`, { body: `${kind} reminder`, tag: item.id }); } catch (e) { /* ignore */ }
+  }
+  toast(`⏰ ${escapeHtml(label)} — ${kind} reminder!`, { duration: 10000 });
+}
+
+function downloadICS(item) {
+  if (!item.alarmAt) return;
+  const fmt = d => d.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+  const now = fmt(new Date());
+  const start = fmt(new Date(item.alarmAt));
+  const end = fmt(new Date(item.alarmAt + 3600000));
+  const esc = s => String(s).replace(/[\\;,]/g, '\\$&').replace(/\n/g, '\\n');
+  const title = esc(item.title || 'Event');
+  const desc = esc(item.body || '');
+  const label = esc(item.alarmLabel || '');
+  const ics = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//Personal OS//EN',
+    'BEGIN:VEVENT',
+    `UID:${item.id || uid()}@personal-os`,
+    `DTSTAMP:${now}`,
+    `DTSTART:${start}`,
+    `DTEND:${end}`,
+    `SUMMARY:${title}`,
+    `DESCRIPTION:${desc}${label ? '\\n' + label : ''}`,
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+  const blob = new Blob([ics], { type: 'text/calendar;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${(item.title || 'event').replace(/[^a-z0-9]/gi, '_')}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('Calendar file downloaded. Open it to add to your calendar.', { duration: 5000 });
+}
 
 /* ---------- Master render ---------------------------------------------- */
 
@@ -1501,6 +1643,7 @@ function renderAll() {
 }
 
 renderAll();
+initAlarmCheck();
 
 if (!storageAvailable) {
   toast('Browser storage is blocked, so nothing will be saved after you close this tab.', { duration: 9000 });
@@ -1516,6 +1659,7 @@ window.PersonalOS = {
      to Drive and loop. */
   setState: (newState) => {
     state = sanitizeState(newState);
+    notifiedAlarms.clear();
     persist();
     renderAll();
   },

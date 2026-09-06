@@ -703,6 +703,79 @@ mark {
 .tag-picker { display: flex; flex-wrap: wrap; gap: 6px; }
 .tag-picker .tag-chip { border: 1px solid var(--border); }
 
+.alarm-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.alarm-row input[type="datetime-local"] {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated-2);
+  color: var(--fg);
+  min-width: 180px;
+  flex: 1;
+}
+
+.alarm-row input[type="datetime-local"]:focus {
+  border-color: var(--accent-dim);
+  outline: none;
+}
+
+.alarm-row input[type="text"] {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated-2);
+  color: var(--fg);
+  min-width: 120px;
+  flex: 1;
+}
+
+.alarm-row input[type="text"]:focus {
+  border-color: var(--accent-dim);
+  outline: none;
+}
+
+.btn-sm {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 1px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.btn-sm:hover { color: var(--fg); border-color: var(--fg-dim); }
+
+.alarm-badge {
+  font-size: 11px;
+  margin-right: 4px;
+  vertical-align: middle;
+  cursor: help;
+}
+
+.alarm-badge[title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  background: var(--bg-elevated-2);
+  border: 1px solid var(--border-strong);
+  padding: 4px 8px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  z-index: 50;
+  transform: translateY(-100%);
+}
+
 .modal-footer {
   display: flex;
   justify-content: flex-end;
