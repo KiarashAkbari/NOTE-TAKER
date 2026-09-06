@@ -238,6 +238,12 @@ const els = {
   helpOk: document.getElementById('help-ok'),
   toastStack: document.getElementById('toast-stack'),
   metaThemeColor: document.getElementById('meta-theme-color'),
+  alarmBackdrop: document.getElementById('alarm-backdrop'),
+  alarmTitle: document.getElementById('alarm-title'),
+  alarmItem: document.getElementById('alarm-item'),
+  alarmLabel: document.getElementById('alarm-label'),
+  alarmKind: document.getElementById('alarm-kind'),
+  alarmDismiss: document.getElementById('alarm-dismiss'),
 };
 
 /* ---------- Helpers ------------------------------------------------------ */
@@ -419,7 +425,7 @@ function topDialog() {
 }
 
 // Click on the backdrop itself (never a child) dismisses.
-[els.modalBackdrop, els.confirmBackdrop, els.helpBackdrop].forEach(backdrop => {
+[els.modalBackdrop, els.confirmBackdrop, els.helpBackdrop, els.alarmBackdrop].forEach(backdrop => {
   backdrop.addEventListener('mousedown', e => {
     if (e.target === backdrop) requestClose(backdrop);
   });
@@ -643,7 +649,7 @@ els.tagFilterList.addEventListener('click', e => {
    of createElement + innerHTML + addEventListener per card. With a few hundred
    notes the per-card version spent most of a repaint in the HTML parser. */
 function noteCardHtml(note) {
-  const alarmBadge = note.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(note.alarmLabel || 'ALARM')}">⏰</span>` : '';
+  const alarmBadge = note.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(note.alarmLabel || 'ALARM')}">[ALARM]</span>` : '';
   return `
     <div class="card" role="button" tabindex="0" data-note-id="${escapeAttr(note.id)}"
          aria-label="Edit note: ${escapeAttr(note.title || 'untitled')}">
@@ -698,7 +704,7 @@ function taskCardHtml(task) {
     ` title="Move to ${STATUS_LABEL[s]}" aria-label="Move to ${STATUS_LABEL[s]}"` +
     `${s === task.status ? ' aria-current="true"' : ''}></button>`).join('');
 
-  const alarmBadge = task.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(task.alarmLabel || 'ALARM')}">⏰</span>` : '';
+  const alarmBadge = task.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(task.alarmLabel || 'ALARM')}">[ALARM]</span>` : '';
 
   return `
     <div class="task-card${task.status === 'done' ? ' is-done' : ''}" draggable="true"
@@ -915,7 +921,8 @@ function openNoteModal(id) {
   els.modalTitle.textContent = id ? 'EDIT NOTE' : 'NEW NOTE';
   els.modalDelete.hidden = !id;
 
-  const alarmVal = note && note.alarmAt ? new Date(note.alarmAt).toISOString().slice(0, 16) : '';
+  const alarmDate = note && note.alarmAt ? new Date(note.alarmAt).toISOString().slice(0, 10) : '';
+  const alarmTime = note && note.alarmAt ? new Date(note.alarmAt).toISOString().slice(11, 16) : '';
   const alarmLabel = note && note.alarmLabel ? note.alarmLabel : '';
 
   els.modalBody.innerHTML = `
@@ -942,10 +949,20 @@ function openNoteModal(id) {
     <div>
       <label>REMINDER</label>
       <div class="alarm-row">
-        <input type="datetime-local" id="field-alarm" value="${escapeAttr(alarmVal)}">
-        <input type="text" id="field-alarm-label" value="${escapeAttr(alarmLabel)}" placeholder="Label (optional)" autocomplete="off">
-        <button type="button" class="btn-ghost btn-sm" id="field-calendar" title="Download calendar file">📅 ICS</button>
+        <input type="date" id="field-alarm-date" value="${escapeAttr(alarmDate)}">
+        <input type="time" id="field-alarm-time" value="${escapeAttr(alarmTime)}">
       </div>
+      <div class="alarm-quick">
+        <button type="button" class="tag-chip" data-quick="today">TODAY</button>
+        <button type="button" class="tag-chip" data-quick="tomorrow">TOMORROW</button>
+        <button type="button" class="tag-chip" data-quick="week">NEXT WEEK</button>
+        <button type="button" class="tag-chip" data-quick="month">NEXT MONTH</button>
+      </div>
+      <div class="alarm-row">
+        <input type="text" id="field-alarm-label" value="${escapeAttr(alarmLabel)}" placeholder="Label (optional)" autocomplete="off">
+        <button type="button" class="btn-ghost btn-sm" id="field-calendar" title="Download calendar file">ICS</button>
+      </div>
+      <div class="field-meta" id="field-alarm-display"></div>
     </div>
     ${note ? `<div class="field-meta">CREATED ${escapeHtml(formatDate(note.createdAt))} · UPDATED ${escapeHtml(formatDate(note.updatedAt))}</div>` : ''}
   `;
@@ -956,16 +973,19 @@ function openNoteModal(id) {
     pinBtn.setAttribute('aria-pressed', String(modalContext.pinned));
   });
 
+  attachQuickSelect();
+  updateAlarmDisplay();
+
   const calBtn = document.getElementById('field-calendar');
   calBtn.addEventListener('click', () => {
-    const alarmEl = document.getElementById('field-alarm');
+    const alarmAt = readAlarmFromFields();
     const alarmLabelEl = document.getElementById('field-alarm-label');
-    if (alarmEl && alarmEl.value) {
+    if (alarmAt) {
       downloadICS({
         id: note ? note.id : '__new__',
         title: (document.getElementById('field-title') || {}).value || 'Note',
         body: (document.getElementById('field-body') || {}).value || '',
-        alarmAt: new Date(alarmEl.value).getTime(),
+        alarmAt,
         alarmLabel: alarmLabelEl ? alarmLabelEl.value : '',
       });
     } else {
@@ -986,7 +1006,8 @@ function openTaskModal(id) {
   els.modalTitle.textContent = id ? 'EDIT TASK' : 'NEW TASK';
   els.modalDelete.hidden = !id;
 
-  const alarmVal = task && task.alarmAt ? new Date(task.alarmAt).toISOString().slice(0, 16) : '';
+  const alarmDate = task && task.alarmAt ? new Date(task.alarmAt).toISOString().slice(0, 10) : '';
+  const alarmTime = task && task.alarmAt ? new Date(task.alarmAt).toISOString().slice(11, 16) : '';
   const alarmLabel = task && task.alarmLabel ? task.alarmLabel : '';
 
   els.modalBody.innerHTML = `
@@ -1012,10 +1033,20 @@ function openTaskModal(id) {
     <div>
       <label>REMINDER</label>
       <div class="alarm-row">
-        <input type="datetime-local" id="field-alarm" value="${escapeAttr(alarmVal)}">
-        <input type="text" id="field-alarm-label" value="${escapeAttr(alarmLabel)}" placeholder="Label (optional)" autocomplete="off">
-        <button type="button" class="btn-ghost btn-sm" id="field-calendar" title="Download calendar file">📅 ICS</button>
+        <input type="date" id="field-alarm-date" value="${escapeAttr(alarmDate)}">
+        <input type="time" id="field-alarm-time" value="${escapeAttr(alarmTime)}">
       </div>
+      <div class="alarm-quick">
+        <button type="button" class="tag-chip" data-quick="today">TODAY</button>
+        <button type="button" class="tag-chip" data-quick="tomorrow">TOMORROW</button>
+        <button type="button" class="tag-chip" data-quick="week">NEXT WEEK</button>
+        <button type="button" class="tag-chip" data-quick="month">NEXT MONTH</button>
+      </div>
+      <div class="alarm-row">
+        <input type="text" id="field-alarm-label" value="${escapeAttr(alarmLabel)}" placeholder="Label (optional)" autocomplete="off">
+        <button type="button" class="btn-ghost btn-sm" id="field-calendar" title="Download calendar file">ICS</button>
+      </div>
+      <div class="field-meta" id="field-alarm-display"></div>
     </div>
     ${task ? `<div class="field-meta">CREATED ${escapeHtml(formatDate(task.createdAt))} · UPDATED ${escapeHtml(formatDate(task.updatedAt))}</div>` : ''}
   `;
@@ -1035,14 +1066,14 @@ function openTaskModal(id) {
 
   const calBtn = document.getElementById('field-calendar');
   calBtn.addEventListener('click', () => {
-    const alarmEl = document.getElementById('field-alarm');
+    const alarmAt = readAlarmFromFields();
     const alarmLabelEl = document.getElementById('field-alarm-label');
-    if (alarmEl && alarmEl.value) {
+    if (alarmAt) {
       downloadICS({
         id: task ? task.id : '__new__',
         title: (document.getElementById('field-title') || {}).value || 'Task',
         body: (document.getElementById('field-body') || {}).value || '',
-        alarmAt: new Date(alarmEl.value).getTime(),
+        alarmAt,
         alarmLabel: alarmLabelEl ? alarmLabelEl.value : '',
       });
     } else {
@@ -1050,6 +1081,8 @@ function openTaskModal(id) {
     }
   });
 
+  attachQuickSelect();
+  updateAlarmDisplay();
   attachTagPickerHandlers();
   attachCounter();
   openEditor();
@@ -1083,7 +1116,8 @@ let editorSnapshot = '';
 function editorFingerprint() {
   const title = document.getElementById('field-title');
   const body = document.getElementById('field-body');
-  const alarm = document.getElementById('field-alarm');
+  const dateEl = document.getElementById('field-alarm-date');
+  const timeEl = document.getElementById('field-alarm-time');
   const alarmLabel = document.getElementById('field-alarm-label');
   if (!title || !body || !modalContext) return '';
   return JSON.stringify([
@@ -1092,7 +1126,8 @@ function editorFingerprint() {
     getSelectedTagIds().slice().sort(),
     modalContext.status || '',
     modalContext.pinned || false,
-    alarm ? alarm.value : '',
+    dateEl ? dateEl.value : '',
+    timeEl ? timeEl.value : '',
     alarmLabel ? alarmLabel.value : '',
   ]);
 }
@@ -1146,9 +1181,8 @@ function saveFromEditor() {
      item with its original id and say so. */
   const recovered = !isNew && !existing;
 
-  const alarmEl = document.getElementById('field-alarm');
+  const alarmAt = readAlarmFromFields();
   const alarmLabelEl = document.getElementById('field-alarm-label');
-  const alarmAt = alarmEl && alarmEl.value ? new Date(alarmEl.value).getTime() : null;
   const alarmLabel = alarmLabelEl ? alarmLabelEl.value.trim() : '';
 
   if (modalContext.type === 'note') {
@@ -1549,6 +1583,49 @@ window.addEventListener('storage', e => {
   } catch (err) { /* ignore malformed cross-tab payloads */ }
 });
 
+/* ---------- Alarm helper functions (shared by note + task modals) -------- */
+
+function readAlarmFromFields() {
+  const dateEl = document.getElementById('field-alarm-date');
+  const timeEl = document.getElementById('field-alarm-time');
+  if (!dateEl || !timeEl || !dateEl.value || !timeEl.value) return null;
+  return new Date(dateEl.value + 'T' + timeEl.value).getTime() || null;
+}
+
+function updateAlarmDisplay() {
+  const display = document.getElementById('field-alarm-display');
+  if (!display) return;
+  const alarmAt = readAlarmFromFields();
+  display.textContent = alarmAt ? 'ALARM SET: ' + formatDate(alarmAt) : '';
+}
+
+function attachQuickSelect() {
+  document.querySelectorAll('.alarm-quick .tag-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      const dateEl = document.getElementById('field-alarm-date');
+      const timeEl = document.getElementById('field-alarm-time');
+      if (!dateEl || !timeEl) return;
+      const now = new Date();
+      let target = new Date(now);
+      switch (chip.dataset.quick) {
+        case 'today': break;
+        case 'tomorrow': target.setDate(target.getDate() + 1); break;
+        case 'week': target.setDate(target.getDate() + 7); break;
+        case 'month': target.setMonth(target.getMonth() + 1); break;
+      }
+      target.setMinutes(0, 0, 0);
+      target.setHours(target.getHours() + 1);
+      dateEl.value = target.toISOString().slice(0, 10);
+      timeEl.value = target.toISOString().slice(11, 16);
+      updateAlarmDisplay();
+    });
+  });
+  const dateEl = document.getElementById('field-alarm-date');
+  const timeEl = document.getElementById('field-alarm-time');
+  if (dateEl) dateEl.addEventListener('change', updateAlarmDisplay);
+  if (timeEl) timeEl.addEventListener('change', updateAlarmDisplay);
+}
+
 /* ---------- Alarm / Reminder + Calendar --------------------------------- */
 let alarmInterval = null;
 let notifiedAlarms = new Set();
@@ -1575,13 +1652,62 @@ function checkAlarms() {
   if (toFire.length) renderAll();
 }
 
+let originalTitle = document.title;
+
+function playAlarmSound() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const freqs = [440, 554, 660];
+    freqs.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.3, ctx.currentTime + i * 0.25);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.25 + 0.15);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + i * 0.25);
+      osc.stop(ctx.currentTime + i * 0.25 + 0.15);
+    });
+    // Second cycle after a gap
+    freqs.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.3, ctx.currentTime + 0.9 + i * 0.25);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.9 + i * 0.25 + 0.15);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(ctx.currentTime + 0.9 + i * 0.25);
+      osc.stop(ctx.currentTime + 0.9 + i * 0.25 + 0.15);
+    });
+  } catch (e) { /* web audio not available */ }
+}
+
 function fireAlarm(item) {
   const label = item.alarmLabel || item.title || 'Untitled';
   const kind = state.notes.includes(item) ? 'Note' : 'Task';
-  if ('Notification' in window && Notification.permission === 'granted') {
-    try { new Notification(`Personal OS: ${label}`, { body: `${kind} reminder`, tag: item.id }); } catch (e) { /* ignore */ }
+  playAlarmSound();
+  if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 400]);
+  document.title = 'ALARM: ' + label;
+  if (els.alarmBackdrop) {
+    els.alarmTitle.textContent = 'ALARM';
+    els.alarmItem.textContent = item.title || 'UNTITLED';
+    els.alarmLabel.textContent = label;
+    els.alarmKind.textContent = kind;
+    els.alarmKind.className = 'pill' + (kind === 'Note' ? '' : '');
+    openDialog(els.alarmBackdrop, { focus: els.alarmDismiss });
   }
-  toast(`⏰ ${escapeHtml(label)} — ${kind} reminder!`, { duration: 10000 });
+  toast('ALARM: ' + label + ' — ' + kind, { duration: 10000 });
+}
+
+if (els.alarmDismiss) {
+  els.alarmDismiss.addEventListener('click', () => {
+    document.title = originalTitle;
+    closeDialog(els.alarmBackdrop);
+  });
 }
 
 function downloadICS(item) {

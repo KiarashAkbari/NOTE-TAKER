@@ -710,25 +710,61 @@ mark {
   flex-wrap: wrap;
 }
 
-.alarm-row input[type="datetime-local"] {
+.alarm-row input[type="date"],
+.alarm-row input[type="time"] {
   font-family: var(--font-mono);
   font-size: 11px;
+  letter-spacing: 0.5px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   background: var(--bg-elevated-2);
   color: var(--fg);
-  min-width: 180px;
   flex: 1;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
 }
 
-.alarm-row input[type="datetime-local"]:focus {
+.alarm-row input[type="date"]:focus,
+.alarm-row input[type="time"]:focus {
   border-color: var(--accent-dim);
   outline: none;
+}
+
+.alarm-row input[type="date"]::-webkit-calendar-picker-indicator,
+.alarm-row input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(0.6);
+  cursor: pointer;
+}
+
+.alarm-quick {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 4px 0 8px 0;
+}
+
+.alarm-quick .tag-chip {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.alarm-quick .tag-chip:hover {
+  color: var(--fg);
+  border-color: var(--fg-dim);
 }
 
 .alarm-row input[type="text"] {
   font-family: var(--font-mono);
   font-size: 11px;
+  letter-spacing: 0.5px;
   padding: 8px 10px;
   border: 1px solid var(--border);
   background: var(--bg-elevated-2);
@@ -756,24 +792,38 @@ mark {
 .btn-sm:hover { color: var(--fg); border-color: var(--fg-dim); }
 
 .alarm-badge {
-  font-size: 11px;
-  margin-right: 4px;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.5px;
+  padding: 1px 5px;
+  border: 1px solid var(--accent-dim);
+  color: var(--accent);
+  margin-right: 6px;
   vertical-align: middle;
   cursor: help;
 }
 
-.alarm-badge[title]:hover::after {
-  content: attr(title);
-  position: absolute;
-  background: var(--bg-elevated-2);
-  border: 1px solid var(--border-strong);
-  padding: 4px 8px;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-  z-index: 50;
-  transform: translateY(-100%);
+/* ---------- Alarm dialog ---------- */
+
+.alarm-modal {
+  animation: alarm-pulse 1.5s ease-in-out 3;
+}
+
+@keyframes alarm-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 20px 4px var(--accent-dim); }
+}
+
+.alarm-item {
+  font-size: 18px;
+  font-weight: 400;
+  color: var(--accent);
+  letter-spacing: 0.5px;
+  word-break: break-word;
+}
+
+.alarm-kind-row {
+  margin-top: 8px;
 }
 
 .modal-footer {
