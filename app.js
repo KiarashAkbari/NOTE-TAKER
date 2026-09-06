@@ -271,6 +271,17 @@ function formatDate(ts) {
   if (diff >= 0 && diff < day) return `${Math.floor(diff / hour)}H AGO`;
   if (diff >= 0 && diff < 7 * day) return `${Math.floor(diff / day)}D AGO`;
   const pad = n => String(n).padStart(2, '0');
+const toLocalDate = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+const toLocalTime = ts => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+function timeRemaining(ts) {
+  const diff = ts - Date.now();
+  if (diff <= 0) return 'ALARM';
+  const min = Math.floor(diff / 60000);
+  if (min < 60) return `${min}M`;
+  const hour = Math.floor(diff / 3600000);
+  if (hour < 24) return `${hour}H`;
+  return `${Math.floor(diff / 86400000)}D`;
+}
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
@@ -649,7 +660,7 @@ els.tagFilterList.addEventListener('click', e => {
    of createElement + innerHTML + addEventListener per card. With a few hundred
    notes the per-card version spent most of a repaint in the HTML parser. */
 function noteCardHtml(note) {
-  const alarmBadge = note.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(note.alarmLabel || 'ALARM')}">[ALARM]</span>` : '';
+  const alarmBadge = note.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(note.alarmLabel || 'ALARM')}">${timeRemaining(note.alarmAt)}</span>` : '';
   return `
     <div class="card" role="button" tabindex="0" data-note-id="${escapeAttr(note.id)}"
          aria-label="Edit note: ${escapeAttr(note.title || 'untitled')}">
@@ -704,7 +715,7 @@ function taskCardHtml(task) {
     ` title="Move to ${STATUS_LABEL[s]}" aria-label="Move to ${STATUS_LABEL[s]}"` +
     `${s === task.status ? ' aria-current="true"' : ''}></button>`).join('');
 
-  const alarmBadge = task.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(task.alarmLabel || 'ALARM')}">[ALARM]</span>` : '';
+  const alarmBadge = task.alarmAt ? `<span class="alarm-badge" title="${escapeAttr(task.alarmLabel || 'ALARM')}">${timeRemaining(task.alarmAt)}</span>` : '';
 
   return `
     <div class="task-card${task.status === 'done' ? ' is-done' : ''}" draggable="true"
@@ -921,8 +932,8 @@ function openNoteModal(id) {
   els.modalTitle.textContent = id ? 'EDIT NOTE' : 'NEW NOTE';
   els.modalDelete.hidden = !id;
 
-  const alarmDate = note && note.alarmAt ? new Date(note.alarmAt).toISOString().slice(0, 10) : '';
-  const alarmTime = note && note.alarmAt ? new Date(note.alarmAt).toISOString().slice(11, 16) : '';
+  const alarmDate = note && note.alarmAt ? toLocalDate(note.alarmAt) : '';
+  const alarmTime = note && note.alarmAt ? toLocalTime(note.alarmAt) : '';
   const alarmLabel = note && note.alarmLabel ? note.alarmLabel : '';
 
   els.modalBody.innerHTML = `
@@ -1006,8 +1017,8 @@ function openTaskModal(id) {
   els.modalTitle.textContent = id ? 'EDIT TASK' : 'NEW TASK';
   els.modalDelete.hidden = !id;
 
-  const alarmDate = task && task.alarmAt ? new Date(task.alarmAt).toISOString().slice(0, 10) : '';
-  const alarmTime = task && task.alarmAt ? new Date(task.alarmAt).toISOString().slice(11, 16) : '';
+  const alarmDate = task && task.alarmAt ? toLocalDate(task.alarmAt) : '';
+  const alarmTime = task && task.alarmAt ? toLocalTime(task.alarmAt) : '';
   const alarmLabel = task && task.alarmLabel ? task.alarmLabel : '';
 
   els.modalBody.innerHTML = `
@@ -1615,8 +1626,8 @@ function attachQuickSelect() {
       }
       target.setMinutes(0, 0, 0);
       target.setHours(target.getHours() + 1);
-      dateEl.value = target.toISOString().slice(0, 10);
-      timeEl.value = target.toISOString().slice(11, 16);
+      dateEl.value = toLocalDate(target.getTime());
+      timeEl.value = toLocalTime(target.getTime());
       updateAlarmDisplay();
     });
   });
@@ -1650,6 +1661,17 @@ function checkAlarms() {
     saveState();
   });
   if (toFire.length) renderAll();
+  updateAlarmBadges();
+}
+
+function updateAlarmBadges() {
+  document.querySelectorAll('.alarm-badge').forEach(el => {
+    const card = el.closest('[data-note-id]') || el.closest('[data-task-id]');
+    if (!card) return;
+    const id = card.dataset.noteId || card.dataset.taskId;
+    const item = state.notes.find(n => n.id === id) || state.tasks.find(t => t.id === id);
+    if (item && item.alarmAt) el.textContent = timeRemaining(item.alarmAt);
+  });
 }
 
 let originalTitle = document.title;
