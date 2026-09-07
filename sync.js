@@ -32,12 +32,18 @@ const SIGNED_IN_FLAG = 'pos-google-signed-in';
 const TOKEN_CACHE_KEY = 'pos-google-token-cache';
 const EXPIRY_SAFETY_MS = 2 * 60 * 1000;
 const PUSH_DEBOUNCE_MS = 1500;
+/* Slack on purpose: alarm precision comes from app.js's 1s local tick, not from
+   this. All this has to do is get a change onto the other devices eventually. */
+const REMOTE_POLL_MS = 60 * 1000;
+const REMOTE_PULL_MIN_GAP_MS = 10 * 1000;
 
 let accessToken = null;
 let remoteFileId = null;
 let tokenClient = null;
 let gsiPromise = null;
 let syncing = false;
+let remotePollTimer = null;
+let lastPullAt = 0;
 
 const syncEls = { btn: null, light: null, status: null };
 
@@ -182,6 +188,7 @@ async function onTokenResponse(resp) {
   try { localStorage.setItem(SIGNED_IN_FLAG, '1'); } catch (e) { /* ignore */ }
   cacheToken(resp.access_token, resp.expires_in || 3600);
   await performInitialSync({ announce: true });
+  startRemotePolling();
 }
 
 async function signOutWithConfirm() {
@@ -207,6 +214,7 @@ function signOut() {
   const token = accessToken;
   accessToken = null;
   remoteFileId = null;
+  stopRemotePolling();
   try { localStorage.removeItem(SIGNED_IN_FLAG); } catch (e) { /* ignore */ }
   clearCachedToken();
   setSyncState('offline');
@@ -339,6 +347,7 @@ async function performInitialSync({ announce = false } = {}) {
     handleSyncError(e);
   } finally {
     syncing = false;
+    flushPendingPush();
   }
 }
 
@@ -346,6 +355,7 @@ function handleSyncError(e) {
   if (e instanceof AuthExpiredError) {
     accessToken = null;
     clearCachedToken();
+    stopRemotePolling();     // nothing to poll with until the user taps
     setSyncState('expired');
     notify('Google session expired. Tap SYNC to reconnect — nothing was lost.', { duration: 7000 });
   } else {
@@ -355,6 +365,16 @@ function handleSyncError(e) {
 
 let pushDebounce = null;
 let pushPending = false;
+
+/* A Drive pull and a local push share `syncing` so they cannot race over the
+   same remote file. The old runPush() path already retried after an in-flight
+   push; initial sync and background pulls need the same handoff or a local edit
+   made during a pull is marked pending and then never uploaded. */
+function flushPendingPush() {
+  if (!pushPending) return;
+  pushPending = false;
+  schedulePush();
+}
 
 function schedulePush() {
   if (!accessToken) return;
@@ -374,7 +394,7 @@ async function runPush() {
     handleSyncError(e);
   } finally {
     syncing = false;
-    if (pushPending) { pushPending = false; schedulePush(); }
+    flushPendingPush();
   }
 }
 
@@ -394,6 +414,72 @@ window.addEventListener('online', () => {
   if (accessToken) performInitialSync();
 });
 
+/* ---------- Staying current without a refresh --------------------------- */
+
+/* An alarm armed on the laptop has to reach the phone, and the phone only knows
+   what it pulled at load. Poll for remote changes so every signed-in device that
+   has the app open converges on its own — the alarm tick in app.js then fires
+   from whatever it finds in state.
+
+   Cheap and auth-free: it reuses the cached bearer token and calls no Google
+   auth API, so it never triggers a login prompt (see rule 1 at the top). */
+async function pullRemoteChanges() {
+  if (!accessToken || syncing) return;
+  if (!window.PersonalOS) return;              // app.js failed to boot
+  if (navigator.onLine === false) return;      // don't manufacture errors offline
+  // Focus and visibility both fire on an app switch; alt-tabbing must not turn
+  // into a request per keystroke.
+  if (Date.now() - lastPullAt < REMOTE_PULL_MIN_GAP_MS) return;
+
+  lastPullAt = Date.now();
+  syncing = true;
+  try {
+    const file = remoteFileId ? { id: remoteFileId } : await findRemoteFile();
+    if (!file) return;
+    remoteFileId = file.id;
+
+    const remote = await downloadRemote(file.id);
+    const remoteUpdatedAt = (remote && remote.meta && remote.meta.updatedAt) || 0;
+    const local = window.PersonalOS.getState();
+    const localUpdatedAt = (local.meta && local.meta.updatedAt) || 0;
+
+    // Strictly newer only. Equal timestamps must not re-enter state, or the
+    // repaint would fight whatever the user is typing.
+    if (remoteUpdatedAt > localUpdatedAt) window.PersonalOS.setState(remote);
+    setSyncState('synced');
+  } catch (e) {
+    /* Only an expired token is worth reporting from a background poll — that one
+       needs a tap. A flaky network here means nothing to the user: local data is
+       untouched, and the next poll or the next push will surface a real fault
+       without this turning the indicator red behind their back. */
+    if (e instanceof AuthExpiredError) handleSyncError(e);
+  } finally {
+    syncing = false;
+    flushPendingPush();
+  }
+}
+
+function startRemotePolling() {
+  if (remotePollTimer) return;
+  remotePollTimer = setInterval(() => {
+    // A hidden tab's timers are throttled anyway; skip the work and rely on the
+    // visibilitychange pull below when the user comes back.
+    if (!document.hidden) pullRemoteChanges();
+  }, REMOTE_POLL_MS);
+}
+
+function stopRemotePolling() {
+  clearInterval(remotePollTimer);
+  remotePollTimer = null;
+}
+
+/* Returning to the app is the moment a stale device is most obvious, so pull
+   immediately rather than waiting out the poll period. */
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) pullRemoteChanges();
+});
+window.addEventListener('focus', pullRemoteChanges);
+
 document.addEventListener('DOMContentLoaded', () => {
   initSyncUI();
 
@@ -406,6 +492,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Reuse the still-valid token — no Google API call, no UI, no popup.
     accessToken = cached.token;
     performInitialSync();
+    startRemotePolling();
   } else {
     // Token genuinely expired. Do NOT call Google automatically —
     // just show the button as needing a tap.

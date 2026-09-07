@@ -48,6 +48,15 @@
   <h2>THIRD-PARTY REQUESTS</h2>
   <p>If you never sign in, the app loads no third-party code and makes no network requests at all. Google's sign-in library is fetched only at the moment you tap SIGN IN, and Google Drive is contacted only while sync is switched on.</p>
 
+  <h2>OFFLINE STORAGE AND REMINDERS</h2>
+  <p>The app installs a service worker — a small script your browser keeps on your device — for two reasons: so the page still opens with no connection, and so reminders can raise a system notification. Both run entirely on your device.</p>
+  <ul>
+    <li>The service worker caches copies of this app's own files (HTML, CSS, JavaScript) on your device. It stores no notes, tasks, or tags, and it sends nothing anywhere.</li>
+    <li>If you set a reminder, the app asks your browser for notification permission. You are only asked at the moment you set one, and you can refuse — reminders then simply appear inside the app instead. Notification text is composed on your device and is never transmitted.</li>
+    <li>There is no push service and no server sending you anything. Reminders are checked by this app while it is open in a tab, which also means the app cannot alert you on a device where it is fully closed. The ICS calendar download exists for that case: it hands the reminder to your own calendar app.</li>
+  </ul>
+  <p>Clearing your browser's site data for this page removes the cached files along with everything else.</p>
+
   <h2>GOOGLE ACCOUNT ACCESS</h2>
   <p>If you sign in with Google, the app requests exactly one permission scope: <code>drive.appdata</code>. This scope allows the app to read and write only its own hidden data file, and grants no access to any other file in your Google Drive, your Gmail, contacts, or any other Google service.</p>
 

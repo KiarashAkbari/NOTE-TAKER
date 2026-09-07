@@ -12,7 +12,7 @@ SYSTEM_STATUS:    OPERATIONAL
 SOURCE_OF_TRUTH:  localStorage['personal-os-v1']
 SYNC_LAYER:       GOOGLE_DRIVE_APPDATAFOLDER (OPT-IN)
 BACKEND:          NONE — THERE IS NO SERVER TO TRUST
-PAYLOAD:          5 STATIC FILES · ~29 KB GZIPPED
+PAYLOAD:          6 STATIC FILES · ~40 KB GZIPPED
 ```
 
 **[ LIVE_SYSTEM ]** → **https://kiarashakbari.github.io/NOTE-TAKER/** ·
@@ -22,7 +22,7 @@ PAYLOAD:          5 STATIC FILES · ~29 KB GZIPPED
 
 ## // 01_SYSTEM_OVERVIEW
 
-**PERSONAL OS** is a notes, task-board, and tag-organizer app that ships as five
+**PERSONAL OS** is a notes, task-board, and tag-organizer app that ships as six
 static files. No framework. No bundler. No `node_modules`. No account. No
 server. Open the page and it works, instantly.
 
@@ -30,10 +30,10 @@ Your data lives in your browser. If you want the same data on your phone, you
 tap SIGN IN and it mirrors to a hidden file in **your own** Google Drive. Not a
 server we run. There is no server we run.
 
-Once the page is loaded, every interaction is offline — reads and writes hit
-`localStorage` synchronously, so nothing waits on a network. (There is no
-service worker, so a *cold* load of the hosted URL still fetches the five
-files; a local clone needs nothing at all.)
+Every interaction is offline — reads and writes hit `localStorage` synchronously,
+so nothing waits on a network. A service worker caches the app's own files, so
+after the first visit even a cold load works with no connection at all. It caches
+code, never your notes, and it talks to nothing.
 
 ### [ THE_NUMBERS ]
 
@@ -44,8 +44,8 @@ files; a local clone needs nothing at all.)
 | Backend services | **0** |
 | Analytics / telemetry / trackers | **0** |
 | Third-party requests before you sign in | **0** |
-| Total source (5 files, uncompressed) | **~105 KB** |
-| Wire weight of the app itself, gzipped | **~29 KB** |
+| Total source (6 files, uncompressed) | **~143 KB** |
+| Wire weight of the app itself, gzipped | **~40 KB** |
 | Monthly cost to run | **$0** |
 
 ### [ CORE_CAPABILITIES ]
@@ -70,9 +70,13 @@ files; a local clone needs nothing at all.)
 > **KEYBOARD-COMPLETE:** Create, search, edit, save, and move tasks between
 > columns without touching the mouse.
 >
-> **REMINDERS THAT NEED NO SERVER:** Alarm any note or task, watch it tick down
-> in the alarms bar, and hand it to a real calendar with a one-click `.ics`.
-> Nothing is scheduled anywhere but your own tab.
+> **REMINDERS THAT NEED NO SERVER:** Alarm any note or task and it rings on every
+> signed-in device that has the app open — system notification, looping chime,
+> vibration — until you turn it off. A closed browser cannot be woken without a
+> server, so `.ics` export hands that case to your real calendar.
+>
+> **WORKS WITH THE NETWORK UNPLUGGED:** A service worker caches the app itself,
+> so a cold load with no connection still opens. It stores code, not notes.
 >
 > **FORWARD-COMPATIBLE STATE:** An old browser cannot strip a newer schema's
 > fields and push the lossy copy back over your good data.
@@ -98,13 +102,21 @@ Load order is load-bearing: `app.js` owns the data, `sync.js` only mirrors it.
        |       |── render: ACTIVE PANEL ONLY (innerHTML template strings)
        |       |── delegated listeners on static containers (repaint binds 0)
        |       |── setInterval(checkAlarms, 1000) ──> fire ──> commit()
+       |       |                                        └── ring until dismissed
        |       └── window.PersonalOS = { getState, setState, renderAll,
        |                                 toast, confirmAction }
+       |
+       +──> [ sw.js ] .................................. OFFLINE + NOTIFY
+       |       |
+       |       |── network-first cache of the app's own files
+       |       └── showNotification() — the only path that works on Android
+       |              ^ tap/swipe ──postMessage──> page stops ringing
        |
        └──> [ sync.js ] ............................... OPTIONAL MIRROR
                |
                |── on 'pos:save'  ──> debounce 1.5s ──> multipart upload
                |── on load + cached token ──> pull, compare meta.updatedAt
+               |── poll 60s + on focus/visible ──> pull (no auth call)
                |── last-write-wins on that single timestamp
                └── Google Drive appDataFolder / personal-os-data.json
                       ^ scope: drive.appdata — nothing else in your Drive
@@ -124,6 +136,8 @@ Load order is load-bearing: `app.js` owns the data, `sync.js` only mirrors it.
 | The multipart boundary is checked against the payload | A note containing the literal boundary would truncate the upload and corrupt the stored file. |
 | Token requests happen **only** on a real user click | Silent renewal is unreliable across browsers and can throw up a full login page unprompted. On expiry the app waits for a tap. |
 | Every helper is declared at module scope | `node --check` resolves no names. Three date helpers once sat *inside* `formatDate()`: it kept working, every card render threw `ReferenceError`, and because the throw beat the `window.PersonalOS` assignment at the end of `app.js`, sync died with it. |
+| Ringing starts and stops in exactly one place | `startRinging()` / `stopRinging()` own the chime, the vibration, the title flash and the CSS class together. Five different things dismiss an alarm; each one calling `clearInterval` itself is how you end up with a tab that buzzes forever. |
+| Background polls never report a network error | A poll the user did not ask for must not turn the badge red behind their back. Only an expired token — which genuinely needs a tap — surfaces from `pullRemoteChanges()`. |
 
 ---
 
@@ -223,15 +237,36 @@ Anything armed shows up in the **alarms bar** across the top, sorted soonest
 first, each chip ticking down live. Click a chip to open the item; click its `×`
 to clear the alarm. Cards carry a coarse badge of their own — `45M`, `3H`, `2D`.
 
-When one fires you get a dialog, a three-tone chime, a vibration on phones that
-support it, and the tab title switches to `ALARM: <label>` for the case where
-you're looking at something else. Firing clears the alarm, so a note is never
-stuck buzzing. Nothing is scheduled outside the page: alarms are checked once a
-second while the tab is open, and a reminder that came due while you were away
-fires when you come back rather than being silently swallowed.
+When one comes due it **keeps going until you turn it off**: a system
+notification that stays on screen, a chime on a loop, repeating vibration, a
+pulsing dialog, and a tab title that flashes. Dismissing it anywhere — the
+DISMISS button, `Esc`, clicking outside, or tapping/swiping the notification —
+stops all of it at once.
 
-`ICS` in the editor downloads a standard calendar file, generated in the browser,
-so a real calendar app can own the notification if you'd rather it did.
+Reminders sync, so an alarm you set on your laptop rings on your phone too.
+Every signed-in device that has the app open pulls changes on its own, without a
+refresh; a device that was asleep or backgrounded catches up the instant you look
+at it, and anything that came due while you were away fires then rather than
+being swallowed.
+
+#### What it cannot do, honestly
+
+**A device where the app is fully closed will not ring.** Waking a closed
+browser requires Web Push, and Web Push requires a server to send the message at
+the alarm's moment. This app has no server — that is the whole premise — and the
+one browser API that would have scheduled a notification locally
+(`TimestampTrigger`) was never standardised and has been removed. So:
+
+| SITUATION | WHAT HAPPENS |
+| --- | --- |
+| App open, tab focused | Rings immediately. |
+| App open, different tab or app | System notification + sound. On another app it may be up to ~1 min late if the browser throttles the tab. |
+| Phone screen locked, browser still running | Notification when the browser is next allowed to run; immediate once you unlock/open it. |
+| Browser closed, or phone rebooted | **Nothing.** Fires when you next open the app. |
+
+For an alarm that must wake a sleeping phone, use the `ICS` button in the editor:
+it downloads a standard calendar file, generated locally, and your own calendar
+app then owns the alert — with all the OS-level reliability this cannot have.
 
 ### [ SEARCH_&_FILTER ]
 
@@ -289,9 +324,13 @@ Sync is entirely optional and off until you tap SIGN IN. What it does:
    `meta.updatedAt`. Newer side wins.
 4. On every local change, it debounces 1.5s and pushes. A pending push is
    flushed on `pagehide` so navigating away doesn't drop it.
-5. If a sync fails and the connection later returns, it retries by itself —
+5. While signed in it also pulls once a minute, and immediately whenever you
+   return to the tab, so a change made on another device shows up without a
+   refresh. Both reuse the token already in hand — no auth call, no popup — and
+   a failed poll is kept quiet rather than flipping the badge to ERROR.
+6. If a sync fails and the connection later returns, it retries by itself —
    reusing the token it already has, with no click and no Google auth call.
-6. On expiry it stops and waits for a tap. It will never ambush you with a login
+7. On expiry it stops and waits for a tap. It will never ambush you with a login
    screen.
 
 ### [ STATUS_READOUT ]
@@ -330,6 +369,7 @@ access token and talks to Drive REST directly.
 ├── index.html      # [SHELL]   Markup, dialogs, pre-paint theme bootstrap
 ├── app.js          # [KERNEL]  State, rendering, interaction. Owns localStorage
 ├── sync.js         # [MIRROR]  Optional Drive layer. Loads AFTER app.js
+├── sw.js           # [WORKER]  Offline shell + OS notifications for alarms
 ├── style.css       # [TOKENS]  Both theme palettes + every component
 ├── privacy.html    # [LEGAL]   Required by the OAuth consent screen
 ├── AGENTS.md       # Contributor + AI-agent contract (read before editing)
@@ -337,7 +377,7 @@ access token and talks to Drive REST directly.
 └── environment.gif # Screen capture, docs only — not loaded by the app
 ```
 
-That is the entire application: the first five entries. Everything after them is
+That is the entire application: the first six entries. Everything after them is
 documentation. There is no `dist/`, no `node_modules/`, no lockfile, no config.
 
 ---

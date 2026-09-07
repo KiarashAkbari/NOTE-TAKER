@@ -1216,6 +1216,11 @@ function saveFromEditor() {
   const alarmLabelEl = document.getElementById('field-alarm-label');
   const alarmLabel = alarmLabelEl ? alarmLabelEl.value.trim() : '';
 
+  /* Ask for notification permission here: the user has just armed an alarm, so
+     the prompt has visible cause, and this call is still inside the click/submit
+     gesture that Chrome requires. Never prompted if you never set a reminder. */
+  if (alarmAt) ensureNotificationPermission();
+
   if (modalContext.type === 'note') {
     const fields = { title, body, tagIds, pinned: modalContext.pinned === true, updatedAt: now, alarmAt, alarmLabel };
     if (existing) Object.assign(existing, fields);
@@ -1661,13 +1666,132 @@ function attachQuickSelect() {
 /* ---------- Alarm / Reminder + Calendar --------------------------------- */
 let alarmInterval = null;
 let notifiedAlarms = new Set();
+let swRegistration = null;
+let swRegistrationPromise = null;
+
+/* Registered for two reasons: an offline app shell, and — the important one —
+   Android has no `new Notification()`. There, showNotification() on a service
+   worker registration is the only way to raise one, and it is also what lets the
+   notification outlive the tab. Progressive: everything still works without it,
+   just without OS-level alerts.
+
+   file:// has no service worker support, so this is a no-op on a double-clicked
+   index.html. That is fine; sync does not work there either. */
+function initServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  swRegistrationPromise = navigator.serviceWorker.register('sw.js')
+    // register() resolving is not enough: Android needs an active worker before
+    // showNotification() is reliable, so wait for ready rather than racing it.
+    .then(() => navigator.serviceWorker.ready)
+    .then(reg => {
+      swRegistration = reg;
+      return reg;
+    });
+  // Keep the rejecting promise for showAlarmNotification() to fall back from,
+  // but mark it handled here so a blocked worker is never an unhandled rejection.
+  swRegistrationPromise.catch(() => {});
+
+  /* The worker forwards notification taps and swipes. Both mean "I have seen
+     this alarm", so both stop the ringing. */
+  navigator.serviceWorker.addEventListener('message', event => {
+    const msg = event.data;
+    if (!msg || msg.type !== 'pos:alarm-stop') return;
+    stopRinging();
+    if (msg.open && msg.id) {
+      if (msg.kind === 'Task') openTaskModal(msg.id);
+      else openNoteModal(msg.id);
+    }
+  });
+}
+
+function notificationsAvailable() {
+  return typeof Notification !== 'undefined';
+}
+
+/* Asked for at the moment the user arms an alarm, not on an arbitrary first
+   click: the request is far more likely to be granted when the reason for it is
+   on screen, and a user who never sets a reminder is never prompted at all.
+   Chrome also requires a user gesture, which arming an alarm is. */
+function ensureNotificationPermission() {
+  if (!notificationsAvailable() || Notification.permission !== 'default') return;
+  try {
+    const result = Notification.requestPermission();
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+  } catch (e) { /* older callback-only signature, or blocked */ }
+}
+
+/* Raise an OS notification so the alert lands even when this tab is buried or
+   the phone is on another app. Prefers the service worker (mandatory on
+   Android, and the notification survives the tab); falls back to the constructor
+   on desktop.
+
+   Async because registration is: a past-due alarm fires during the initial
+   render, well before register() resolves, and reading `swRegistration` at that
+   moment would wrongly conclude there is no worker and take the constructor path
+   that throws on Android. Waiting on navigator.serviceWorker.ready closes that
+   race. Nothing awaits this — alerting is fire-and-forget. */
+function showAlarmNotification({ item, label, kind }, sessionId) {
+  if (!notificationsAvailable() || Notification.permission !== 'granted') return;
+
+  const title = 'ALARM · ' + (item.title || 'UNTITLED');
+  const options = {
+    body: label,
+    tag: 'pos-alarm-' + item.id,      // replaces, never stacks, per item
+    renotify: true,
+    requireInteraction: true,          // stays up until dismissed, where supported
+    silent: false,
+    vibrate: [200, 100, 200, 100, 400],
+    data: { id: item.id, kind },
+  };
+
+  const viaWorker = swRegistration
+    ? Promise.resolve(swRegistration)
+    : (swRegistrationPromise ||
+      ('serviceWorker' in navigator ? navigator.serviceWorker.ready : Promise.reject()));
+
+  viaWorker
+    .then(reg => {
+      if (!reg || !reg.showNotification) throw new Error('no showNotification');
+      // A slow worker may only become ready after the user has dismissed the
+      // alarm. Never let that stale async completion resurrect a notification.
+      if (!ringing || ringing.id !== sessionId) return;
+      swRegistration = swRegistration || reg;
+      return reg.showNotification(title, options);
+    })
+    .catch(() => {
+      // Desktop without a worker. Android throws here, which is why the worker
+      // path is tried first.
+      if (!ringing || ringing.id !== sessionId) return;
+      try { new Notification(title, options); } catch (e) { /* give up quietly */ }
+    });
+}
+
+function clearAlarmNotifications() {
+  if (!swRegistration) return;
+  if (swRegistration.active) {
+    swRegistration.active.postMessage({ type: 'pos:clear-alarm-notifications' });
+  }
+  if (swRegistration.getNotifications) {
+    swRegistration.getNotifications()
+      .then(list => list.forEach(n => { if (n.tag && n.tag.startsWith('pos-alarm-')) n.close(); }))
+      .catch(() => {});
+  }
+}
 
 function initAlarmCheck() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    document.addEventListener('click', () => { Notification.requestPermission(); }, { once: true });
-  }
   checkAlarms();
   alarmInterval = setInterval(checkAlarms, 1000);
+
+  /* A background tab gets its interval throttled hard (once a minute or worse),
+     and a phone suspends timers outright when the screen locks. Re-check the
+     moment the page is looked at again so a due alarm fires immediately instead
+     of waiting for the next throttled tick — this is what removed the need to
+     manually refresh. */
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) checkAlarms();
+  });
+  window.addEventListener('focus', checkAlarms);
+  window.addEventListener('pageshow', checkAlarms);
 }
 
 /* Runs every second, so it must stay cheap and must never throw out of the
@@ -1675,7 +1799,7 @@ function initAlarmCheck() {
    through commit() like everything else, once per tick rather than once per
    item, so a tick that fires three alarms still persists and pushes once.
 
-   The label and kind are captured BEFORE the mutation — fireAlarm() reads
+   The label and kind are captured BEFORE the mutation — fireAlarms() reads
    alarmLabel, and derives note-vs-task from state.notes.includes(item), both of
    which are gone once the fields are cleared. */
 function checkAlarms() {
@@ -1697,7 +1821,7 @@ function checkAlarms() {
           item.alarmLabel = '';
         });
       });
-      fired.forEach(fireAlarm);
+      fireAlarms(fired);
     }
 
     updateAlarmBadges();
@@ -1792,65 +1916,197 @@ function clearAlarm(id, kind) {
   }, { message: 'Alarm cleared.', toast: { duration: 2000 } });
 }
 
-let originalTitle = document.title;
+/* ---------- Ringing: sound, vibration, title, animation ----------------- */
 
-function playAlarmSound() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const freqs = [440, 554, 660];
-    freqs.forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.3, ctx.currentTime + i * 0.25);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + i * 0.25 + 0.15);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(ctx.currentTime + i * 0.25);
-      osc.stop(ctx.currentTime + i * 0.25 + 0.15);
-    });
-    // Second cycle after a gap
-    freqs.forEach((freq, i) => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'sine';
-      osc.frequency.value = freq;
-      gain.gain.setValueAtTime(0.3, ctx.currentTime + 0.9 + i * 0.25);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.9 + i * 0.25 + 0.15);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start(ctx.currentTime + 0.9 + i * 0.25);
-      osc.stop(ctx.currentTime + 0.9 + i * 0.25 + 0.15);
-    });
-  } catch (e) { /* web audio not available */ }
+/* An alarm keeps ringing until the user turns it off. Everything that makes
+   noise or moves is owned by one session object, so there is exactly one place
+   that starts it and exactly one that stops it. */
+
+const CHIME_PERIOD_MS = 1900;
+const VIBRATE_PATTERN = [400, 200, 400, 200, 600];
+const VIBRATE_PERIOD_MS = 2200;
+const TITLE_FLASH_MS = 1000;
+
+let originalTitle = document.title;
+let audioCtx = null;
+let ringing = null;   // { chime, vibrate, title, flashOn, resumeAudio }
+let ringSessionId = 0;
+
+/* One AudioContext for the page, unlocked by the first real gesture. Browsers
+   start it 'suspended' until then, and an alarm that fires before the user has
+   touched anything would otherwise be silent forever. */
+function ensureAudioContext() {
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) return null;
+  if (!audioCtx) {
+    try { audioCtx = new Ctor(); } catch (e) { return null; }
+  }
+  if (audioCtx.state === 'suspended' && audioCtx.resume) audioCtx.resume().catch(() => {});
+  return audioCtx;
 }
 
-/* Takes the pre-captured { item, label, kind } from checkAlarms(), not a bare
-   item: by the time this runs the alarm fields have already been cleared. */
-function fireAlarm({ item, label, kind }) {
-  playAlarmSound();
-  if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 400]);
-  document.title = 'ALARM: ' + label;
-  if (els.alarmBackdrop && els.alarmTitle && els.alarmItem && els.alarmLabel && els.alarmKind && els.alarmDismiss) {
-    els.alarmTitle.textContent = 'ALARM';
-    els.alarmItem.textContent = item.title || 'UNTITLED';
-    els.alarmLabel.textContent = label;
-    els.alarmKind.textContent = kind;
-    els.alarmKind.className = 'pill';
-    /* Restoring the title belongs on onClose, not on the DISMISS handler:
-       backdrop click and Esc both go straight to closeDialog(), and hanging the
-       reset off the button alone left the tab reading "ALARM: …" forever. */
-    openDialog(els.alarmBackdrop, {
-      focus: els.alarmDismiss,
-      onClose: () => { document.title = originalTitle; },
+['pointerdown', 'keydown'].forEach(type => {
+  document.addEventListener(type, () => ensureAudioContext(), { once: true, passive: true });
+});
+
+/* One three-tone rise. Called on a loop while ringing rather than scheduling a
+   long sequence up front, so stopping is instant. */
+function playChime() {
+  const ctx = ensureAudioContext();
+  if (!ctx || ctx.state !== 'running') return false;
+  try {
+    [440, 554, 660].forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const at = ctx.currentTime + i * 0.25;
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.3, at);
+      gain.gain.exponentialRampToValueAtTime(0.001, at + 0.15);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(at);
+      osc.stop(at + 0.15);
+    });
+    return true;
+  } catch (e) {
+    return false;   // web audio unavailable
+  }
+}
+
+/* Starts a ring session, or folds another alarm into the one already going.
+   Everything that makes noise or moves lives on `ringing`, so there is exactly
+   one thing to tear down. */
+function startRinging(label, count) {
+  if (ringing) {
+    // Already ringing: adopt the newest label and add to the outstanding tally
+    // so the dialog and the tab title cannot disagree about what is due.
+    ringing.outstanding += count;
+    setRingingLabel(label);
+    return;
+  }
+
+  ringing = {
+    chime: null, vibrate: null, title: null,
+    id: ++ringSessionId,
+    label, outstanding: count, flashOn: true, resumeAudio: null,
+  };
+
+  const started = playChime();
+  ringing.chime = setInterval(playChime, CHIME_PERIOD_MS);
+
+  /* Autoplay policy: if the tab has never been touched the context is suspended
+     and playChime() was a no-op. Start the sound on the very next gesture, as
+     long as the alarm is still ringing by then. */
+  if (!started) {
+    ringing.resumeAudio = () => { if (ringing) playChime(); };
+    ['pointerdown', 'keydown'].forEach(type => {
+      document.addEventListener(type, ringing.resumeAudio, { once: true, passive: true });
     });
   }
-  toast('ALARM: ' + label + ' — ' + kind, { duration: 10000 });
+
+  if (navigator.vibrate) {
+    const buzz = () => { try { navigator.vibrate(VIBRATE_PATTERN); } catch (e) { /* ignore */ } };
+    buzz();
+    ringing.vibrate = setInterval(buzz, VIBRATE_PERIOD_MS);
+  }
+
+  /* Flashing the title is the only attention signal left when the tab is in the
+     background and notifications are denied. It reads ringing.label on every
+     beat rather than closing over it, so a later alarm retitles the tab. */
+  document.title = 'ALARM: ' + label;
+  ringing.title = setInterval(() => {
+    if (!ringing) return;
+    ringing.flashOn = !ringing.flashOn;
+    document.title = ringing.flashOn ? 'ALARM: ' + ringing.label : originalTitle;
+  }, TITLE_FLASH_MS);
+
+  document.body.classList.add('is-ringing');
+}
+
+function setRingingLabel(label) {
+  if (!ringing) return;
+  ringing.label = label;
+  ringing.flashOn = true;
+  document.title = 'ALARM: ' + label;
+}
+
+/* The single teardown. Reached from DISMISS, Esc, backdrop click, a notification
+   tap and a notification swipe — every one of those routes through here. */
+function stopRinging() {
+  if (!ringing) return;
+  clearInterval(ringing.chime);
+  clearInterval(ringing.vibrate);
+  clearInterval(ringing.title);
+  if (ringing.resumeAudio) {
+    ['pointerdown', 'keydown'].forEach(type => {
+      document.removeEventListener(type, ringing.resumeAudio);
+    });
+  }
+  /* Nulled before closeDialog(), whose onClose calls back into here: the guard
+     above is what stops that becoming infinite recursion. */
+  ringing = null;
+
+  if (navigator.vibrate) { try { navigator.vibrate(0); } catch (e) { /* ignore */ } }
+  document.body.classList.remove('is-ringing');
+  document.title = originalTitle;
+  clearAlarmNotifications();
+  if (els.alarmBackdrop) closeDialog(els.alarmBackdrop);
+}
+
+/* ---------- Firing ------------------------------------------------------ */
+
+/* Takes the pre-captured { item, label, kind } records from checkAlarms(), not
+   bare items: by the time this runs the alarm fields have already been cleared.
+
+   Alerting is layered on purpose, strongest first, because each layer can be
+   unavailable: an OS notification (works with the tab buried or the phone on
+   another app), then sound + vibration + a flashing title, then the in-app
+   dialog, then a toast. */
+function fireAlarms(fired) {
+  if (!fired.length) return;
+
+  /* The newest alarm is the one shown, and it also retitles a session already in
+     progress — otherwise the dialog and the tab title disagree about what is
+     due. `outstanding` counts everything unacknowledged, including alarms from an
+     earlier tick that are still ringing. */
+  const primary = fired[fired.length - 1];
+  startRinging(primary.label, fired.length);
+  const outstanding = ringing ? ringing.outstanding : fired.length;
+  // Start the ring session first. Notification delivery waits for a service
+  // worker on first load, and the session id prevents that async work from
+  // creating an alert after the user has already dismissed it.
+  fired.forEach(alarm => showAlarmNotification(alarm, ringing && ringing.id));
+
+  if (els.alarmBackdrop && els.alarmTitle && els.alarmItem && els.alarmLabel && els.alarmKind && els.alarmDismiss) {
+    els.alarmTitle.textContent = outstanding > 1 ? `ALARM · ${outstanding} DUE` : 'ALARM';
+    els.alarmItem.textContent = primary.item.title || 'UNTITLED';
+    els.alarmLabel.textContent = outstanding > 1
+      ? `${primary.label} · +${outstanding - 1} MORE`
+      : primary.label;
+    els.alarmKind.textContent = primary.kind;
+    els.alarmKind.className = 'pill';
+    /* Stopping belongs on onClose, not on the DISMISS handler: backdrop click
+       and Esc both go straight to closeDialog(), and hanging teardown off the
+       button alone left the tab ringing with the title stuck on "ALARM: …".
+       openDialog() is guarded against a double push, so re-calling it for a
+       second alarm while the dialog is already up is a no-op. */
+    openDialog(els.alarmBackdrop, {
+      focus: els.alarmDismiss,
+      onClose: stopRinging,
+    });
+  }
+
+  toast(
+    outstanding > 1
+      ? `${outstanding} alarms due.`
+      : 'ALARM: ' + primary.label + ' — ' + primary.kind,
+    { duration: 10000 }
+  );
 }
 
 if (els.alarmDismiss) {
-  els.alarmDismiss.addEventListener('click', () => closeDialog(els.alarmBackdrop));
+  els.alarmDismiss.addEventListener('click', stopRinging);
 }
 
 function downloadICS(item) {
@@ -1912,6 +2168,7 @@ function renderAll() {
   renderAlarmsBar();
 }
 
+initServiceWorker();
 renderAll();
 initAlarmCheck();
 

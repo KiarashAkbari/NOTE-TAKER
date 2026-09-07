@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Static, dependency-free web app: `index.html` + `app.js` + `sync.js` +
+Static, dependency-free web app: `index.html` + `app.js` + `sync.js` + `sw.js` +
 `style.css` + `privacy.html`. There is no `package.json`, no build, no bundler,
 no test runner, and no CI. Do not add any of those, and do not introduce a
 framework or npm dependency — see "Non-negotiables".
@@ -9,7 +9,7 @@ framework or npm dependency — see "Non-negotiables".
 
 ```sh
 python3 -m http.server 8000   # from the repo root
-node --check app.js && node --check sync.js
+node --check app.js && node --check sync.js && node --check sw.js
 ```
 
 - Open over `http://localhost:8000`, not `file://`: Google OAuth rejects
@@ -37,6 +37,20 @@ node --check app.js && node --check sync.js
   - Cards carry no per-node listeners, so synthesise real events
     (`new w.MouseEvent('click', { bubbles: true })` on the element) rather than
     calling `.click()` on a child that does not exist.
+  - **Top-level `let` / `const` are invisible to `w.eval()`.** Indirect eval gets
+    its own lexical scope, so `w.eval('ringing')` throws `ReferenceError` while
+    `w.checkAlarms()` works — function declarations land on the global object,
+    lexical bindings do not. Assert on observable state (`document.body.classList`,
+    `document.title`, `localStorage`) instead of reaching for internals, and drive
+    `sync.js` through its real cached-token path rather than assigning
+    `accessToken`.
+  - Alarms and notifications need doubles for `Notification`,
+    `navigator.serviceWorker`, `navigator.vibrate` and `AudioContext`. Make the
+    `AudioContext` double resume **asynchronously**: browsers do not flip to
+    `running` in the same tick, and a synchronous fake hides the autoplay-policy
+    path entirely.
+  - Notifications are raised through a promise (`serviceWorker.ready`), so
+    `await` a macrotask before asserting on them.
 - Throwaway linters, via `npx` from a scratch dir:
   - `html-validate@8` on both HTML files. Pin the major: v9's formatter needs
     `node:util.styleText`, absent on Node 18. It enforces `type` on every
@@ -48,7 +62,7 @@ node --check app.js && node --check sync.js
 
 - Work lands on `v2`; `main` is what GitHub Pages publishes. Do not push to
   `main` without being asked. They currently differ only by `README.md` and
-  `environment.gif` — the five app files are identical on both.
+  `environment.gif` — the app files are identical on both.
 - Git refuses to run here until you add the ownership exception (the checkout
   is root-owned but the files belong to `ubuntu`):
   `git -c safe.directory=/root/note-taker <cmd>`.
@@ -107,30 +121,90 @@ Load order is load-bearing. `app.js` must run before `sync.js`.
 
 - Notes **and** tasks carry `alarmAt` (epoch ms or `null`) and `alarmLabel`.
   Both are in `KNOWN_ITEM_FIELDS`; `sanitizeItem()` coerces them.
-- `initAlarmCheck()` starts `setInterval(checkAlarms, 1000)`. That tick must stay
-  cheap and must never throw out of the interval — it is wrapped in `try`.
+- `initAlarmCheck()` starts `setInterval(checkAlarms, 1000)` **and** re-checks on
+  `visibilitychange` / `focus` / `pageshow`. Those event hooks are not belt-and-
+  braces: a hidden tab's timers are throttled to roughly once a minute and a
+  locked phone suspends them entirely, so the interval alone is what used to make
+  a manual refresh necessary.
 - Firing is a mutation (it clears the alarm fields), so it goes through
   `commit()` **once per tick**, not once per item. `checkAlarms()` captures
-  `label` and `kind` before mutating, because `fireAlarm()` cannot recover either
+  `label` and `kind` before mutating, because `fireAlarms()` cannot recover either
   after `alarmLabel` is blanked and the item is still in `state.notes`.
 - `notifiedAlarms` (a `Set` of ids) is the once-only guard. Any wholesale state
   replacement must clear it or a re-armed alarm on the same id can never fire
   again — the cross-tab `storage` handler and `PersonalOS.setState()` both do.
   It is deliberately not persisted: a past-due alarm fires again after a reload,
   which is the desired behaviour for something you may have missed.
+- **`startRinging()` / `stopRinging()` are the only places ringing begins and
+  ends.** One session object owns the chime interval, the vibration interval, the
+  title-flash interval, the `is-ringing` class on `<body>` and the outstanding
+  notifications. Five different gestures dismiss an alarm — DISMISS, `Esc`,
+  backdrop click, notification tap, notification swipe — and every one of them
+  routes through `stopRinging()`. Add a sixth the same way; do not clear a timer
+  in a handler. `stopRinging()` calls `closeDialog()`, whose `onClose` calls
+  `stopRinging()` again, so it nulls the session **before** closing to break the
+  cycle.
+- Audio is one page-lifetime `AudioContext`, unlocked by the first
+  `pointerdown` / `keydown`. Autoplay policy means an alarm firing before any
+  gesture is silent, so `startRinging()` arms a one-shot gesture listener that
+  starts the chime late if the alarm is still going. Never construct a context
+  per chime.
+- Notification permission is requested in `saveFromEditor()` when the user arms
+  an alarm — a real gesture, with the reason on screen. Do not move it back to a
+  blanket first-click prompt: a user who never sets a reminder must never be asked.
+- **`showAlarmNotification()` must prefer the service worker.** Android has no
+  `new Notification()` — it throws — so `registration.showNotification()` is the
+  only path that works there, and it is also what lets the notification outlive
+  the tab. It waits on `navigator.serviceWorker.ready` rather than reading
+  `swRegistration`, because a past-due alarm fires during the first render, long
+  before `register()` resolves.
+- Notification delivery is asynchronous. `showAlarmNotification()` is tagged
+  with the active ringing session id, so a service worker that starts only after
+  the user dismisses an alarm cannot resurrect a stale OS notification. Preserve
+  that guard if this code is refactored.
+- `sw.js` handles `notificationclick` and `notificationclose` by `postMessage`-ing
+  the page, because the page owns the sound. The worker cannot schedule anything:
+  without a server to send a Web Push there is no way to alert a device whose
+  browser is closed. Do not add code that pretends otherwise — the README states
+  the limits and the ICS handoff plainly, and users rely on that being true.
+- `sw.js` is deliberately **network-first**. This repo has no build step, no
+  hashed filenames and no version handshake, so a cache-first worker would pin
+  users to a stale `app.js` with no way out. Cache writes in the fetch handler
+  must stay in `event.waitUntil()`: a mobile worker may terminate after returning
+  the network response otherwise, leaving the offline cache only intermittently
+  updated. An offline miss must return a real `Response` (the existing 503), not
+  `undefined`, which makes `respondWith()` throw.
 - Two different countdown formatters, on purpose: `timeRemaining()` for the
   coarse one-unit card badge, `formatCountdown()` for the ticking alarms-bar
   chip. Both floor, so a 60-minute gap reads `59M`.
 - The alarms bar is a grid area (`grid-area: alarms`) in `.app-grid`, declared in
   both the desktop and the `max-width: 900px` `grid-template-areas`. Adding
   chrome rows means editing both.
-- `initAlarmCheck()` asks for `Notification` permission on the first click, but
-  **nothing in the codebase ever constructs a `Notification`.** Alerting is the
-  in-app `alertdialog`, `playAlarmSound()` (Web Audio), `navigator.vibrate`, and
-  the `document.title` swap. Either wire up real notifications or drop the
-  prompt; do not assume background notifications work today.
-- Alarms need no `privacy.html` change: nothing new leaves the browser, and ICS
-  export is a local `Blob` download.
+- Ringing animations are `infinite` and keyed off `body.is-ringing`. The
+  `prefers-reduced-motion` block deliberately **exempts** them — an alarm must
+  still read as ringing — but downgrades them to slow opacity/colour cycling with
+  no transforms, well under the 3Hz photosensitivity threshold.
+- `privacy.html` covers the service worker and the notification permission
+  explicitly. Both were added there when they were added here; keep that true.
+
+### Cross-device delivery
+
+- Alarm data rides the normal Drive sync. `sync.js` polls every 60s and on
+  `focus` / `visibilitychange`, so any signed-in device with the app open
+  converges on its own and its local tick fires the alarm.
+- `pullRemoteChanges()` reuses the cached bearer token and calls **no** Google
+  auth API, which is what keeps it inside the "never request a token outside a
+  user click" rule. It also rate-limits itself (`REMOTE_PULL_MIN_GAP_MS`) because
+  `focus` and `visibilitychange` both fire on an app switch.
+- A background poll must stay silent about network failures — only
+  `AuthExpiredError` surfaces, since only that needs a tap. Reporting flaky Wi-Fi
+  from a poll the user never asked for turns the badge red for no reason.
+- `pullRemoteChanges()` adopts remote state only when it is **strictly** newer.
+  On equal timestamps a repaint would fight whatever the user is typing.
+- Pushes and pulls share `syncing`. If a `pos:save` arrives while an initial sync
+  or background pull owns that lock, `runPush()` sets `pushPending`; the operation
+  that releases the lock must call `flushPendingPush()`. Otherwise a local edit
+  made while Drive is being read is silently never uploaded.
 
 ## Non-negotiables
 

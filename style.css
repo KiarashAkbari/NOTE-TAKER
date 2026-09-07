@@ -32,6 +32,7 @@ html[data-theme="dark"] {
   --danger: #E8483A;        /* 4.96:1 on --bg */
   --on-danger: #14120F;     /* 4.82:1 on --danger */
   --shadow: rgba(0, 0, 0, 0.6);
+  --shadow-alarm: rgba(122, 51, 0, 0.72);   /* backdrop wash while ringing */
   --dot-empty: #3A3940;
 }
 
@@ -50,6 +51,7 @@ html[data-theme="light"] {
   --danger: #A3231A;        /* 6.73:1 on --bg */
   --on-danger: #FFFFFF;     /* 7.47:1 on --danger */
   --shadow: rgba(0, 0, 0, 0.25);
+  --shadow-alarm: rgba(168, 60, 0, 0.34);   /* backdrop wash while ringing */
   --dot-empty: #D6D4D0;
 }
 
@@ -897,13 +899,54 @@ mark {
 
 /* ---------- Alarm dialog ---------- */
 
+/* Runs until the user turns the alarm off — app.js holds `is-ringing` on <body>
+   for exactly as long as it is ringing. A fixed iteration count would go quiet
+   while the alarm was still going. */
 .alarm-modal {
-  animation: alarm-pulse 1.5s ease-in-out 3;
+  animation: alarm-pulse 1.5s ease-in-out infinite;
 }
 
 @keyframes alarm-pulse {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
   50% { box-shadow: 0 0 20px 4px var(--accent-dim); }
+}
+
+/* Whole-screen wash, so a glance at the tab is enough to tell it is ringing. */
+.is-ringing .alarm-modal {
+  border-color: var(--accent);
+}
+
+.is-ringing #alarm-backdrop.is-active {
+  animation: alarm-backdrop-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes alarm-backdrop-pulse {
+  0%, 100% { background: var(--shadow); }
+  50% { background: var(--shadow-alarm); }
+}
+
+.is-ringing .alarm-item {
+  animation: alarm-text-pulse 0.75s steps(1, end) infinite;
+}
+
+@keyframes alarm-text-pulse {
+  0%, 100% { color: var(--accent); }
+  50% { color: var(--fg); }
+}
+
+/* The bell keeps moving even where animation is disabled, because it is the
+   affordance that says "this is live", not decoration. */
+.alarm-bell {
+  font-size: 30px;
+  line-height: 1;
+  text-align: center;
+  margin-bottom: 10px;
+  animation: alarm-bell-swing 0.6s ease-in-out infinite;
+}
+
+@keyframes alarm-bell-swing {
+  0%, 100% { transform: rotate(-14deg); }
+  50% { transform: rotate(14deg); }
 }
 
 .alarm-item {
@@ -1018,6 +1061,25 @@ mark {
   *, *::before, *::after {
     animation-duration: 0.001ms !important;
     transition-duration: 0.001ms !important;
+  }
+
+  /* Exception: a ringing alarm must still read as ringing. Slow, low-contrast
+     opacity/colour cycling carries the signal without the motion that triggers
+     vestibular symptoms — no transforms, no swinging, no flashing at rates
+     anywhere near the 3Hz photosensitivity threshold. */
+  .alarm-modal,
+  .is-ringing #alarm-backdrop.is-active,
+  .is-ringing .alarm-item {
+    animation-duration: 2s !important;
+  }
+
+  .alarm-bell {
+    animation: alarm-bell-fade 2s ease-in-out infinite !important;
+  }
+
+  @keyframes alarm-bell-fade {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
   }
 }
 
