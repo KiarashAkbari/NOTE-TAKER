@@ -238,6 +238,7 @@ const els = {
   helpOk: document.getElementById('help-ok'),
   toastStack: document.getElementById('toast-stack'),
   metaThemeColor: document.getElementById('meta-theme-color'),
+  alarmsBar: document.getElementById('alarms-bar'),
   alarmBackdrop: document.getElementById('alarm-backdrop'),
   alarmTitle: document.getElementById('alarm-title'),
   alarmItem: document.getElementById('alarm-item'),
@@ -1665,6 +1666,7 @@ function checkAlarms() {
     });
     if (toFire.length) renderAll();
     updateAlarmBadges();
+    updateAlarmCountdowns();
   } catch (e) { /* guard interval against transient errors */ }
 }
 
@@ -1676,6 +1678,83 @@ function updateAlarmBadges() {
     const item = state.notes.find(n => n.id === id) || state.tasks.find(t => t.id === id);
     if (item && item.alarmAt) el.textContent = timeRemaining(item.alarmAt);
   });
+}
+
+function formatCountdown(ts) {
+  const diff = ts - Date.now();
+  if (diff <= 0) return 'ALARM NOW';
+  const s = Math.floor(diff / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `${d}D ${h % 24}H LEFT`;
+  if (h > 0) return `${h}H ${m % 60}M LEFT`;
+  if (m > 0) return `${m}M ${s % 60}S LEFT`;
+  return `${s}S LEFT`;
+}
+
+function alarmChipHtml(item) {
+  const kind = state.notes.includes(item) ? 'note' : 'task';
+  const when = toLocalDate(item.alarmAt).slice(5) + ' ' + toLocalTime(item.alarmAt);
+  return `
+    <div class="alarm-chip" role="group" data-alarm-id="${escapeAttr(item.id)}" data-alarm-kind="${kind}">
+      <button type="button" class="alarm-chip-open" title="Open ${kind}">
+        <span class="alarm-chip-title">${escapeHtml(item.title || 'UNTITLED')}</span>
+        <span class="alarm-chip-when">${escapeHtml(when)}</span>
+        <span class="alarm-chip-timer alarm-countdown">${escapeHtml(formatCountdown(item.alarmAt))}</span>
+      </button>
+      <button type="button" class="alarm-chip-clear" title="Clear alarm" aria-label="Clear alarm">×</button>
+    </div>`;
+}
+
+function renderAlarmsBar() {
+  const withAlarm = [...state.notes, ...state.tasks]
+    .filter(i => i.alarmAt)
+    .sort((a, b) => a.alarmAt - b.alarmAt);
+  if (withAlarm.length === 0) {
+    els.alarmsBar.hidden = true;
+    els.alarmsBar.innerHTML = '';
+    return;
+  }
+  els.alarmsBar.hidden = false;
+  els.alarmsBar.innerHTML =
+    '<span class="alarms-bar-label">ALARMS</span>' +
+    '<div class="alarms-bar-list">' + withAlarm.map(alarmChipHtml).join('') + '</div>';
+}
+
+function updateAlarmCountdowns() {
+  document.querySelectorAll('#alarms-bar .alarm-countdown').forEach(el => {
+    const chip = el.closest('.alarm-chip');
+    if (!chip) return;
+    const id = chip.dataset.alarmId;
+    const item = state.notes.find(n => n.id === id) || state.tasks.find(t => t.id === id);
+    if (item && item.alarmAt) el.textContent = formatCountdown(item.alarmAt);
+  });
+}
+
+if (els.alarmsBar) {
+  els.alarmsBar.addEventListener('click', e => {
+    const chip = e.target.closest('.alarm-chip');
+    if (!chip) return;
+    const id = chip.dataset.alarmId;
+    const kind = chip.dataset.alarmKind;
+    if (e.target.closest('.alarm-chip-clear')) {
+      clearAlarm(id, kind);
+      return;
+    }
+    if (kind === 'note') openNoteModal(id);
+    else openTaskModal(id);
+  });
+}
+
+function clearAlarm(id, kind) {
+  const list = kind === 'note' ? state.notes : state.tasks;
+  const item = list.find(i => i.id === id);
+  if (!item || !item.alarmAt) return;
+  commit(() => {
+    item.alarmAt = null;
+    item.alarmLabel = '';
+  }, { message: 'Alarm cleared.', toast: { duration: 2000 } });
 }
 
 let originalTitle = document.title;
@@ -1792,6 +1871,7 @@ function renderAll() {
   renderHeaderCounts();
   renderGlobalProgress();
   renderStats();
+  renderAlarmsBar();
 }
 
 renderAll();

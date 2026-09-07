@@ -105,9 +105,10 @@ kbd {
 .app-grid {
   display: grid;
   grid-template-columns: 200px 1fr;
-  grid-template-rows: 64px 1fr;
+  grid-template-rows: 64px auto 1fr;
   grid-template-areas:
     "topbar topbar"
+    "rail   alarms"
     "rail   content";
   height: 100vh;
 }
@@ -129,6 +130,97 @@ kbd {
   gap: 14px;
   flex-wrap: wrap;
 }
+
+/* ---------- Alarms bar ---------- */
+
+.alarms-bar {
+  grid-area: alarms;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  overflow-x: auto;
+  min-height: 0;
+}
+
+.alarms-bar[hidden] { display: none; }
+
+.alarms-bar-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: var(--fg-dim);
+  flex: none;
+  white-space: nowrap;
+}
+
+.alarms-bar-list {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  flex: 1;
+  padding: 2px 0;
+}
+
+.alarm-chip {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated-2);
+  flex: none;
+  max-width: 260px;
+}
+
+.alarm-chip-open {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 10px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+  width: 100%;
+}
+
+.alarm-chip-open:hover .alarm-chip-title { color: var(--accent); }
+
+.alarm-chip-title {
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg);
+  letter-spacing: 0.3px;
+}
+
+.alarm-chip-when {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--fg-dim);
+  letter-spacing: 0.5px;
+}
+
+.alarm-chip-timer {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--accent);
+  letter-spacing: 0.5px;
+}
+
+.alarm-chip-clear {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  padding: 0 10px;
+  cursor: pointer;
+  border-left: 1px solid var(--border);
+  flex: none;
+}
+
+.alarm-chip-clear:hover { color: var(--danger); }
 
 .filter-rail {
   grid-area: rail;
@@ -934,10 +1026,11 @@ mark {
 @media (max-width: 900px) {
   .app-grid {
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto 1fr;
+    grid-template-rows: auto auto auto 1fr;
     grid-template-areas:
       "topbar"
       "rail"
+      "alarms"
       "content";
     height: auto;
     min-height: 100vh;
@@ -957,4 +1050,5 @@ mark {
   .content { padding: 20px 16px; }
   .panel-header h2 { font-size: 17px; }
   kbd { display: none; }
+  .alarms-bar { padding: 5px 12px; }
 }
