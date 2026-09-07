@@ -260,6 +260,37 @@ function escapeAttr(str) {
   return escapeHtml(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+/* These four must stay at module scope. They were once declared inside
+   formatDate(), which still passed `node --check` but threw
+   "timeRemaining is not defined" from the first card render — and because that
+   throw happens before window.PersonalOS is assigned at the end of this file,
+   it took Drive sync down with it. Nested helpers are invisible to a syntax
+   check; keep them out here. */
+const pad = n => String(n).padStart(2, '0');
+
+/* Values for <input type="date"> / <input type="time">, which both expect
+   local wall-clock time, not a UTC ISO slice. */
+const toLocalDate = ts => {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
+const toLocalTime = ts => {
+  const d = new Date(ts);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+/* Coarse "time until" for the badge on a card: one unit, no seconds. The
+   alarms bar wants the ticking version — see formatCountdown(). */
+function timeRemaining(ts) {
+  const diff = ts - Date.now();
+  if (diff <= 0) return 'ALARM';
+  const min = Math.floor(diff / 60000);
+  if (min < 60) return `${min}M`;
+  const hour = Math.floor(diff / 3600000);
+  if (hour < 24) return `${hour}H`;
+  return `${Math.floor(diff / 86400000)}D`;
+}
+
 /* Local time, not UTC — the old ISO slice showed the wrong day for anyone
    east/west of GMT late in the day. */
 function formatDate(ts) {
@@ -271,18 +302,6 @@ function formatDate(ts) {
   if (diff >= 0 && diff < hour) return `${Math.floor(diff / min)}M AGO`;
   if (diff >= 0 && diff < day) return `${Math.floor(diff / hour)}H AGO`;
   if (diff >= 0 && diff < 7 * day) return `${Math.floor(diff / day)}D AGO`;
-  const pad = n => String(n).padStart(2, '0');
-const toLocalDate = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
-const toLocalTime = ts => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-function timeRemaining(ts) {
-  const diff = ts - Date.now();
-  if (diff <= 0) return 'ALARM';
-  const min = Math.floor(diff / 60000);
-  if (min < 60) return `${min}M`;
-  const hour = Math.floor(diff / 3600000);
-  if (hour < 24) return `${hour}H`;
-  return `${Math.floor(diff / 86400000)}D`;
-}
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
@@ -1651,20 +1670,36 @@ function initAlarmCheck() {
   alarmInterval = setInterval(checkAlarms, 1000);
 }
 
+/* Runs every second, so it must stay cheap and must never throw out of the
+   interval. Firing clears the alarm fields, which is a real mutation: it goes
+   through commit() like everything else, once per tick rather than once per
+   item, so a tick that fires three alarms still persists and pushes once.
+
+   The label and kind are captured BEFORE the mutation — fireAlarm() reads
+   alarmLabel, and derives note-vs-task from state.notes.includes(item), both of
+   which are gone once the fields are cleared. */
 function checkAlarms() {
   try {
     const now = Date.now();
-    const toFire = [...state.notes, ...state.tasks].filter(
-      item => item.alarmAt && !notifiedAlarms.has(item.id) && item.alarmAt <= now
-    );
-    toFire.forEach(item => {
-      notifiedAlarms.add(item.id);
-      fireAlarm(item);
-      item.alarmAt = null;
-      item.alarmLabel = '';
-      saveState();
-    });
-    if (toFire.length) renderAll();
+    const fired = [...state.notes, ...state.tasks]
+      .filter(item => item.alarmAt && !notifiedAlarms.has(item.id) && item.alarmAt <= now)
+      .map(item => ({
+        item,
+        label: item.alarmLabel || item.title || 'Untitled',
+        kind: state.notes.includes(item) ? 'Note' : 'Task',
+      }));
+
+    if (fired.length) {
+      commit(() => {
+        fired.forEach(({ item }) => {
+          notifiedAlarms.add(item.id);
+          item.alarmAt = null;
+          item.alarmLabel = '';
+        });
+      });
+      fired.forEach(fireAlarm);
+    }
+
     updateAlarmBadges();
     updateAlarmCountdowns();
   } catch (e) { /* guard interval against transient errors */ }
@@ -1791,9 +1826,9 @@ function playAlarmSound() {
   } catch (e) { /* web audio not available */ }
 }
 
-function fireAlarm(item) {
-  const label = item.alarmLabel || item.title || 'Untitled';
-  const kind = state.notes.includes(item) ? 'Note' : 'Task';
+/* Takes the pre-captured { item, label, kind } from checkAlarms(), not a bare
+   item: by the time this runs the alarm fields have already been cleared. */
+function fireAlarm({ item, label, kind }) {
   playAlarmSound();
   if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 400]);
   document.title = 'ALARM: ' + label;
@@ -1803,16 +1838,19 @@ function fireAlarm(item) {
     els.alarmLabel.textContent = label;
     els.alarmKind.textContent = kind;
     els.alarmKind.className = 'pill';
-    openDialog(els.alarmBackdrop, { focus: els.alarmDismiss });
+    /* Restoring the title belongs on onClose, not on the DISMISS handler:
+       backdrop click and Esc both go straight to closeDialog(), and hanging the
+       reset off the button alone left the tab reading "ALARM: …" forever. */
+    openDialog(els.alarmBackdrop, {
+      focus: els.alarmDismiss,
+      onClose: () => { document.title = originalTitle; },
+    });
   }
   toast('ALARM: ' + label + ' — ' + kind, { duration: 10000 });
 }
 
 if (els.alarmDismiss) {
-  els.alarmDismiss.addEventListener('click', () => {
-    document.title = originalTitle;
-    closeDialog(els.alarmBackdrop);
-  });
+  els.alarmDismiss.addEventListener('click', () => closeDialog(els.alarmBackdrop));
 }
 
 function downloadICS(item) {

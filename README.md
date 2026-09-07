@@ -70,6 +70,10 @@ files; a local clone needs nothing at all.)
 > **KEYBOARD-COMPLETE:** Create, search, edit, save, and move tasks between
 > columns without touching the mouse.
 >
+> **REMINDERS THAT NEED NO SERVER:** Alarm any note or task, watch it tick down
+> in the alarms bar, and hand it to a real calendar with a one-click `.ics`.
+> Nothing is scheduled anywhere but your own tab.
+>
 > **FORWARD-COMPATIBLE STATE:** An old browser cannot strip a newer schema's
 > fields and push the lossy copy back over your good data.
 
@@ -93,6 +97,7 @@ Load order is load-bearing: `app.js` owns the data, `sync.js` only mirrors it.
        |       |                        └── dispatch 'pos:save'
        |       |── render: ACTIVE PANEL ONLY (innerHTML template strings)
        |       |── delegated listeners on static containers (repaint binds 0)
+       |       |── setInterval(checkAlarms, 1000) ──> fire ──> commit()
        |       └── window.PersonalOS = { getState, setState, renderAll,
        |                                 toast, confirmAction }
        |
@@ -110,7 +115,7 @@ Load order is load-bearing: `app.js` owns the data, `sync.js` only mirrors it.
 | RULE | WHY IT EXISTS |
 | --- | --- |
 | `commit()` is the only mutation path | It is what stamps `meta.updatedAt`. A mutation that skips it silently loses the last-write-wins race against Drive. |
-| `saveState()` has exactly one caller | Single choke point for persist + repaint + sync signal. |
+| `saveState()` has exactly one caller | Single choke point for persist + repaint + sync signal. A firing alarm is a mutation like any other: it goes through `commit()`, once per tick rather than once per item. |
 | `PersonalOS.setState()` does **not** emit `pos:save` | That asymmetry is the only thing preventing a remote → local → remote push loop. It looks like a bug. It is not. |
 | Only the active panel repaints | Painting hidden panels wasted most of every repaint and moved focus-bearing DOM out from under open dialogs. |
 | Every interpolated value passes `escapeHtml()` / `escapeAttr()` | Full-redraw `innerHTML` rendering with user text in it. |
@@ -118,6 +123,7 @@ Load order is load-bearing: `app.js` owns the data, `sync.js` only mirrors it.
 | Uploads resolve `remoteFileId` before creating | Otherwise a fresh load that pushes early creates a second data file and the two copies diverge. |
 | The multipart boundary is checked against the payload | A note containing the literal boundary would truncate the upload and corrupt the stored file. |
 | Token requests happen **only** on a real user click | Silent renewal is unreliable across browsers and can throw up a full login page unprompted. On expiry the app waits for a tap. |
+| Every helper is declared at module scope | `node --check` resolves no names. Three date helpers once sat *inside* `formatDate()`: it kept working, every card render threw `ReferenceError`, and because the throw beat the `window.PersonalOS` assignment at the end of `app.js`, sync died with it. |
 
 ---
 
@@ -159,8 +165,14 @@ own origin, register your own OAuth client — see `05_SYNC_PROTOCOL`.
 ### [ VERIFY_A_CHANGE ]
 
 ```bash
-node --check app.js && node --check sync.js   # the whole "test suite"
+node --check app.js && node --check sync.js
 ```
+
+That is a syntax check, not a test suite — it parses the files without resolving
+a single name. It will happily wave through a helper declared in the wrong
+scope, which is exactly how a `ReferenceError` once reached production. Load the
+page and exercise what you touched. Contributors' notes on driving the real UI
+headlessly live in [`AGENTS.md`](AGENTS.md).
 
 ---
 
@@ -200,6 +212,26 @@ undoable.
 Also the data console: **EXPORT BACKUP** (plain JSON, downloaded locally),
 **IMPORT BACKUP**, and **DELETE ALL DATA**, plus a readout of how many bytes
 you're actually using.
+
+### [ REMINDERS ]
+
+Any note or task can carry one alarm: a date, a time, and an optional label.
+`TODAY` / `TOMORROW` / `NEXT WEEK` / `NEXT MONTH` fill the fields in one tap,
+rounded to the next hour.
+
+Anything armed shows up in the **alarms bar** across the top, sorted soonest
+first, each chip ticking down live. Click a chip to open the item; click its `×`
+to clear the alarm. Cards carry a coarse badge of their own — `45M`, `3H`, `2D`.
+
+When one fires you get a dialog, a three-tone chime, a vibration on phones that
+support it, and the tab title switches to `ALARM: <label>` for the case where
+you're looking at something else. Firing clears the alarm, so a note is never
+stuck buzzing. Nothing is scheduled outside the page: alarms are checked once a
+second while the tab is open, and a reminder that came due while you were away
+fires when you come back rather than being silently swallowed.
+
+`ICS` in the editor downloads a standard calendar file, generated in the browser,
+so a real calendar app can own the notification if you'd rather it did.
 
 ### [ SEARCH_&_FILTER ]
 
@@ -301,10 +333,11 @@ access token and talks to Drive REST directly.
 ├── style.css       # [TOKENS]  Both theme palettes + every component
 ├── privacy.html    # [LEGAL]   Required by the OAuth consent screen
 ├── AGENTS.md       # Contributor + AI-agent contract (read before editing)
-└── README.md       # This document
+├── README.md       # This document
+└── environment.gif # Screen capture, docs only — not loaded by the app
 ```
 
-That is the entire application: the first five entries. The last two are
+That is the entire application: the first five entries. Everything after them is
 documentation. There is no `dist/`, no `node_modules/`, no lockfile, no config.
 
 ---
