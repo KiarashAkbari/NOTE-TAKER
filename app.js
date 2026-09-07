@@ -1215,6 +1215,7 @@ function saveFromEditor() {
       : `${kind} ${isNew ? 'created' : 'saved'}.`,
     toast: { duration: recovered ? 7000 : 2500 },
   });
+  checkAlarms();
 }
 
 els.modalDelete.addEventListener('click', async () => {
@@ -1645,23 +1646,26 @@ function initAlarmCheck() {
   if ('Notification' in window && Notification.permission === 'default') {
     document.addEventListener('click', () => { Notification.requestPermission(); }, { once: true });
   }
+  checkAlarms();
   alarmInterval = setInterval(checkAlarms, 1000);
 }
 
 function checkAlarms() {
-  const now = Date.now();
-  const toFire = [...state.notes, ...state.tasks].filter(
-    item => item.alarmAt && !notifiedAlarms.has(item.id) && item.alarmAt <= now
-  );
-  toFire.forEach(item => {
-    notifiedAlarms.add(item.id);
-    fireAlarm(item);
-    item.alarmAt = null;
-    item.alarmLabel = '';
-    saveState();
-  });
-  if (toFire.length) renderAll();
-  updateAlarmBadges();
+  try {
+    const now = Date.now();
+    const toFire = [...state.notes, ...state.tasks].filter(
+      item => item.alarmAt && !notifiedAlarms.has(item.id) && item.alarmAt <= now
+    );
+    toFire.forEach(item => {
+      notifiedAlarms.add(item.id);
+      fireAlarm(item);
+      item.alarmAt = null;
+      item.alarmLabel = '';
+      saveState();
+    });
+    if (toFire.length) renderAll();
+    updateAlarmBadges();
+  } catch (e) { /* guard interval against transient errors */ }
 }
 
 function updateAlarmBadges() {
@@ -1714,12 +1718,12 @@ function fireAlarm(item) {
   playAlarmSound();
   if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 400]);
   document.title = 'ALARM: ' + label;
-  if (els.alarmBackdrop) {
+  if (els.alarmBackdrop && els.alarmTitle && els.alarmItem && els.alarmLabel && els.alarmKind && els.alarmDismiss) {
     els.alarmTitle.textContent = 'ALARM';
     els.alarmItem.textContent = item.title || 'UNTITLED';
     els.alarmLabel.textContent = label;
     els.alarmKind.textContent = kind;
-    els.alarmKind.className = 'pill' + (kind === 'Note' ? '' : '');
+    els.alarmKind.className = 'pill';
     openDialog(els.alarmBackdrop, { focus: els.alarmDismiss });
   }
   toast('ALARM: ' + label + ' — ' + kind, { duration: 10000 });
