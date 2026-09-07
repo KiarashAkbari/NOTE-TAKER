@@ -61,6 +61,8 @@
     </div>
   </header>
 
+  <div class="alarms-bar" id="alarms-bar" hidden></div>
+
   <aside class="filter-rail">
     <div class="rail-section">
       <label class="rail-title" for="search-input">FIND</label>
@@ -211,6 +213,25 @@
 </div>
 
 <div class="toast-stack" id="toast-stack" role="status" aria-live="polite"></div>
+
+<!-- ALARM DIALOG -->
+<div class="modal-backdrop" id="alarm-backdrop">
+  <div class="modal modal-sm alarm-modal" role="alertdialog" aria-modal="true" aria-labelledby="alarm-title">
+    <div class="modal-header">
+      <span class="modal-title" id="alarm-title">ALARM</span>
+    </div>
+    <div class="modal-body">
+      <div class="alarm-item" id="alarm-item">UNTITLED</div>
+      <div class="field-meta" id="alarm-label"></div>
+      <div class="alarm-kind-row">
+        <span class="pill" id="alarm-kind">NOTE</span>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn-primary" id="alarm-dismiss">DISMISS</button>
+    </div>
+  </div>
+</div>
 
 <script src="app.js"></script>
 <script src="sync.js"></script>
