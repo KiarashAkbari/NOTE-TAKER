@@ -702,6 +702,33 @@ mark {
   margin-top: 14px;
 }
 
+/* ---------- AI bar (top of content, shown only when pos-ai-enabled) --- */
+
+.ai-bar { padding: 0 0 20px 0; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+.ai-bar[hidden] { display: none; }
+.ai-bar-inner { display: flex; flex-direction: column; gap: 10px; }
+.ai-input {
+  width: 100%; min-height: 64px; max-height: 140px; resize: vertical;
+  border: 1px solid var(--border); background: var(--bg-elevated);
+  color: var(--fg); padding: 10px 12px; font-family: var(--font-sans);
+  font-size: 13px; line-height: 1.6;
+}
+.ai-input::placeholder { color: var(--fg-dim); }
+.ai-input:focus { border-color: var(--accent-dim); outline: none; }
+.ai-bar-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+
+/* ---------- Toggles (ORGANIZE) ----------------------------------------- */
+
+.toggle-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 12px; border: 1px solid var(--border); background: var(--bg-elevated); margin-bottom: 10px; }
+.toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+.toggle input { position: absolute; opacity: 0; pointer-events: none; width: 0; height: 0; }
+.toggle-track { width: 36px; height: 20px; border: 1px solid var(--border-strong); background: var(--bg-elevated-2); position: relative; flex: none; transition: background 0.15s, border-color 0.15s; }
+.toggle-track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; background: var(--fg-dim); transition: transform 0.15s, background 0.15s; }
+.toggle input:checked + .toggle-track { background: var(--accent); border-color: var(--accent); }
+.toggle input:checked + .toggle-track::after { transform: translateX(16px); background: var(--on-accent); }
+.toggle-label { font-family: var(--font-mono); font-size: 11px; letter-spacing: 1px; color: var(--fg); }
+.toggle-row .field-meta { margin-top: 0; }
+
 /* ---------- Modal ---------- */
 
 .modal-backdrop {

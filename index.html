@@ -84,6 +84,18 @@
 
   <main class="content">
 
+    <!-- AI BAR — visible only when pos-ai-enabled is ON; lazy loads ai.js on demand -->
+    <div class="ai-bar" id="ai-bar" hidden>
+      <div class="ai-bar-inner">
+        <label class="rail-title" for="ai-input">AI · DESCRIBE WHAT YOU NEED</label>
+        <textarea id="ai-input" class="ai-input" placeholder="e.g. Buy milk tomorrow at 9am, call mom next Monday, pay rent in 3 days" rows="2" autocomplete="off" spellcheck="true"></textarea>
+        <div class="ai-bar-actions">
+          <span class="field-meta" id="ai-hint">Heuristic · 100% free · Offline + online · Creates tasks with title, description, alarm and calendar</span>
+          <button type="button" class="btn-primary" id="ai-generate-btn">✦ GENERATE</button>
+        </div>
+      </div>
+    </div>
+
     <!-- NOTES VIEW -->
     <section class="view-panel is-active" id="view-notes" role="tabpanel" aria-labelledby="tab-notes" tabindex="0">
       <div class="panel-header">
@@ -130,6 +142,27 @@
       </div>
 
       <div class="organize-list" id="organize-list"></div>
+
+      <div class="section-block">
+        <div class="section-title">AI &amp; CALENDAR — OPTIONAL, FREE</div>
+        <p class="section-note">AI runs 100% on this device (heuristic + optional on-device model). Calendar is your Google Calendar via the same sign-in — both are optional and off by default.</p>
+        <div class="toggle-row" id="ai-toggle-row">
+          <label class="toggle">
+            <input type="checkbox" id="toggle-ai">
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span class="toggle-label">AI TASK GENERATION</span>
+          </label>
+          <span class="field-meta">Off = zero loads, zero requests</span>
+        </div>
+        <div class="toggle-row" id="calendar-toggle-row">
+          <label class="toggle">
+            <input type="checkbox" id="toggle-calendar">
+            <span class="toggle-track" aria-hidden="true"></span>
+            <span class="toggle-label">GOOGLE CALENDAR</span>
+          </label>
+          <span class="field-meta" id="calendar-toggle-hint">Off = ICS + template URL only</span>
+        </div>
+      </div>
 
       <div class="section-block">
         <div class="section-title">DATA · YOURS, ALWAYS</div>
@@ -236,5 +269,6 @@
 
 <script src="app.js"></script>
 <script src="sync.js"></script>
+<!-- ai.js is NOT included here — lazy-loaded like GSI only when pos-ai-enabled is ON and user generates (see app.js) -->
 </body>
 </html>

@@ -20,12 +20,13 @@
    not the domain root).
    ========================================================================== */
 
-const CACHE = 'personal-os-shell-v1';
+const CACHE = 'personal-os-shell-v2';
 const ASSETS = [
   './',
   './index.html',
   './app.js',
   './sync.js',
+  './ai.js',
   './sw.js',
   './style.css',
   './privacy.html',

@@ -27,6 +27,10 @@
 const GOOGLE_CLIENT_ID = '173858466609-ma8o00vpgpog0ghnkl0rhttfe0bqm6uf.apps.googleusercontent.com';
 const GSI_SRC = 'https://accounts.google.com/gsi/client';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+const CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+// Single sign-in: one token covers both scopes. Calendar calls are gated
+// by pos-calendar-enabled at runtime — see app.js and isCalendarEnabled().
+const COMBINED_SCOPE = DRIVE_SCOPE + ' ' + CALENDAR_SCOPE;
 const DRIVE_FILE_NAME = 'personal-os-data.json';
 const SIGNED_IN_FLAG = 'pos-google-signed-in';
 const TOKEN_CACHE_KEY = 'pos-google-token-cache';
@@ -167,7 +171,7 @@ async function requestToken() {
   if (!tokenClient) {
     tokenClient = google.accounts.oauth2.initTokenClient({
       client_id: GOOGLE_CLIENT_ID,
-      scope: DRIVE_SCOPE,
+      scope: COMBINED_SCOPE,
       callback: onTokenResponse,
     });
   }
@@ -479,6 +483,12 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) pullRemoteChanges();
 });
 window.addEventListener('focus', pullRemoteChanges);
+
+/* Exposed so app.js can reuse the same bearer for Calendar API without a second auth. */
+window.PersonalOS_Sync = {
+  getAccessToken: function () { return accessToken; },
+  isSignedIn: function () { return !!accessToken; }
+};
 
 document.addEventListener('DOMContentLoaded', () => {
   initSyncUI();

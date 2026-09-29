@@ -44,9 +44,9 @@ const KNOWN_ITEM_FIELDS = ['id', 'title', 'body', 'tagIds', 'createdAt', 'update
 
 function carryUnknown(raw, target) {
   Object.keys(raw).forEach(key => {
-    // __proto__ from JSON.parse is an own property; assigning it via spread is
-    // harmless but pointless, and skipping it keeps the object shape obvious.
-    if (key === '__proto__' || KNOWN_ITEM_FIELDS.includes(key)) return;
+    // __proto__ from JSON.parse is an own property; constructor/prototype are
+    // also blocked as hardening — values are never executed but keeps the shape clean.
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype' || KNOWN_ITEM_FIELDS.includes(key)) return;
     target[key] = raw[key];
   });
   return target;
@@ -2145,6 +2145,288 @@ function downloadICS(item) {
   toast('Calendar file downloaded. Open it to add to your calendar.', { duration: 5000 });
 }
 
+/* ---------- Calendar helpers (zero-auth fallbacks + API when enabled) -- */
+
+function buildCalendarTemplateUrl(item) {
+  // Google Calendar template URL — zero auth, never touches the API.
+  // Used when pos-calendar-enabled is OFF.
+  var base = 'https://calendar.google.com/calendar/render?action=TEMPLATE';
+  var title = encodeURIComponent(item.title || 'Event');
+  var detailsParts = [];
+  if (item.body) detailsParts.push(item.body);
+  if (item.alarmLabel) detailsParts.push(item.alarmLabel);
+  var details = encodeURIComponent(detailsParts.join('\n'));
+  var dates = '';
+  if (item.alarmAt) {
+    var fmtCal = function (d) { return d.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'; };
+    var start = fmtCal(new Date(item.alarmAt));
+    var end = fmtCal(new Date(item.alarmAt + 3600000));
+    dates = '&dates=' + start + '/' + end;
+  }
+  return base + '&text=' + title + '&details=' + details + dates;
+}
+
+function openCalendarTemplate(item) {
+  var url = buildCalendarTemplateUrl(item);
+  try { window.open(url, '_blank', 'noopener'); } catch (e) { /* ignore */ }
+  toast('Opening Google Calendar…', { duration: 3000 });
+}
+
+async function createCalendarEvent(item) {
+  // When pos-calendar-enabled is ON, reuse the single sign-in token to hit Calendar API.
+  // sync.js exposes getAccessToken(); if no token, fall back to ICS/template.
+  var token = null;
+  try {
+    if (window.PersonalOS_Sync && typeof window.PersonalOS_Sync.getAccessToken === 'function') {
+      token = window.PersonalOS_Sync.getAccessToken();
+    }
+  } catch (e) { /* ignore */ }
+  if (!token) {
+    // Not signed in or token not available — open template instead
+    openCalendarTemplate(item);
+    return false;
+  }
+  if (!item.alarmAt) {
+    // No date — still open template so user can choose date
+    openCalendarTemplate(item);
+    return false;
+  }
+
+  var start = new Date(item.alarmAt).toISOString();
+  var end = new Date(item.alarmAt + 3600000).toISOString();
+  var body = {
+    summary: item.title || 'Event',
+    description: (item.body || '') + (item.alarmLabel ? '\n' + item.alarmLabel : ''),
+    start: { dateTime: start },
+    end: { dateTime: end },
+    reminders: { useDefault: true }
+  };
+  try {
+    var res = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (res.status === 401 || res.status === 403) {
+      toast('Calendar session expired. Tap SYNC to reconnect.', { duration: 6000 });
+      openCalendarTemplate(item);
+      return false;
+    }
+    if (!res.ok) throw new Error('calendar insert failed: ' + res.status);
+    toast('Added to Google Calendar.', { duration: 3000 });
+    return true;
+  } catch (e) {
+    // Network or API error — fall back to ICS
+    try { downloadICS(item); } catch (_) { openCalendarTemplate(item); }
+    toast('Calendar API failed — downloaded ICS instead.', { duration: 5000 });
+    return false;
+  }
+}
+
+/* ---------- AI — toggles + lazy loader + execution ----------------------- */
+
+var AI_KEY = 'pos-ai-enabled';
+var CAL_KEY = 'pos-calendar-enabled';
+var aiPromise = null;
+
+function isAiEnabled() {
+  try { return localStorage.getItem(AI_KEY) === '1'; } catch (e) { return false; }
+}
+
+function isCalendarEnabled() {
+  try { return localStorage.getItem(CAL_KEY) === '1'; } catch (e) { return false; }
+}
+
+function setToggleState() {
+  var aiEl = document.getElementById('toggle-ai');
+  var calEl = document.getElementById('toggle-calendar');
+  var aiBar = document.getElementById('ai-bar');
+  var calHint = document.getElementById('calendar-toggle-hint');
+  if (aiEl) aiEl.checked = isAiEnabled();
+  if (calEl) calEl.checked = isCalendarEnabled();
+  if (aiBar) aiBar.hidden = !isAiEnabled();
+  if (calHint) {
+    if (isCalendarEnabled()) calHint.textContent = 'On = uses same sign-in to add events';
+    else calHint.textContent = 'Off = ICS + template URL only';
+  }
+}
+
+function loadAi() {
+  if (window.PersonalOS_AI) return Promise.resolve();
+  if (aiPromise) return aiPromise;
+  aiPromise = new Promise(function (resolve, reject) {
+    var s = document.createElement('script');
+    s.src = 'ai.js';
+    s.async = true;
+    s.onload = function () {
+      if (window.PersonalOS_AI) resolve();
+      else reject(new Error('ai missing'));
+    };
+    s.onerror = function () { reject(new Error('ai load failed')); };
+    document.head.appendChild(s);
+  });
+  aiPromise.catch(function () { aiPromise = null; });
+  return aiPromise;
+}
+
+function renderAiPartsPreview(parts) {
+  var hint = document.getElementById('ai-hint');
+  if (!hint || !parts || !parts.length) {
+    if (hint) hint.textContent = 'Heuristic · 100% free · Offline + online · Creates tasks with title, description, alarm and calendar';
+    return;
+  }
+  var n = parts.length;
+  var withAlarm = parts.filter(function (p) { return p.alarmAt; }).length;
+  hint.textContent = n + ' item' + (n === 1 ? '' : 's') + ' · ' + withAlarm + ' with reminder · tags auto-matched';
+}
+
+async function runAiGenerate() {
+  if (!isAiEnabled()) {
+    toast('AI is off. Turn it on in ORGANIZE first.', { duration: 3000 });
+    return;
+  }
+  var input = document.getElementById('ai-input');
+  if (!input || !input.value.trim()) {
+    toast('Type what you need first.', { duration: 3000 });
+    if (input) input.focus();
+    return;
+  }
+  var raw = input.value.trim();
+  var btn = document.getElementById('ai-generate-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+
+  var parsed = [];
+  try {
+    await loadAi();
+    parsed = window.PersonalOS_AI.parse(raw, { tags: state.tags, now: Date.now() });
+  } catch (e) {
+    toast('AI not available — try again.', { duration: 4000 });
+    if (btn) { btn.disabled = false; btn.textContent = '✦ GENERATE'; }
+    return;
+  }
+
+  if (!parsed || !parsed.length) {
+    toast('Nothing to create — try more detail.', { duration: 3000 });
+    if (btn) { btn.disabled = false; btn.textContent = '✦ GENERATE'; }
+    return;
+  }
+
+  // Preview hint before commit
+  renderAiPartsPreview(parsed);
+
+  // Confirm if large
+  if (parsed.length > 6) {
+    var ok = await confirmAction({
+      title: 'AI GENERATE',
+      message: 'Create ' + parsed.length + ' tasks from your text?',
+      detail: parsed.slice(0, 6).map(function (p) { return '· ' + truncate(p.title, 40) + (p.alarmAt ? ' — ' + formatDate(p.alarmAt) : ''); })
+        .concat(parsed.length > 6 ? ['· …and ' + (parsed.length - 6) + ' more'] : []),
+      okLabel: 'CREATE ' + parsed.length,
+      danger: false
+    });
+    if (!ok) {
+      if (btn) { btn.disabled = false; btn.textContent = '✦ GENERATE'; }
+      return;
+    }
+  }
+
+  // Build calendar strategy: each item gets ICS always available; when calendar ON and has alarmAt,
+  // also push to Google Calendar (and ICS stays as artifact if API fails).
+  var nowTs = Date.now();
+  var createdIds = [];
+
+  commit(function () {
+    parsed.forEach(function (p, idx) {
+      var id = uid();
+      var title = p.title || 'UNTITLED';
+      var body = p.body || '';
+      var tagIds = (p.tagIds || []).filter(function (tid) { return state.tags.some(function (t) { return t.id === tid; }); });
+      var alarmAt = Number.isFinite(p.alarmAt) ? p.alarmAt : null;
+      var alarmLabel = typeof p.alarmLabel === 'string' ? p.alarmLabel : (alarmAt ? title : '');
+      var kind = p.kind === 'note' ? 'note' : 'task';
+      createdIds.push({ id: id, title: title, body: body, alarmAt: alarmAt, alarmLabel: alarmLabel, kind: kind });
+
+      if (kind === 'note') {
+        state.notes.push({ id: id, title: title, body: body, tagIds: tagIds, pinned: false, createdAt: nowTs + idx, updatedAt: nowTs + idx, alarmAt: alarmAt, alarmLabel: alarmLabel });
+      } else {
+        state.tasks.push({ id: id, title: title, body: body, tagIds: tagIds, status: 'not_started', createdAt: nowTs + idx, updatedAt: nowTs + idx, alarmAt: alarmAt, alarmLabel: alarmLabel });
+      }
+    });
+  }, {
+    message: 'Created ' + parsed.length + ' item' + (parsed.length === 1 ? '' : 's') + '.',
+    toast: { duration: 5000 }
+  });
+
+  if (btn) { btn.disabled = false; btn.textContent = '✦ GENERATE'; }
+  renderAiPartsPreview(parsed);
+
+  // Clear input only after success
+  if (input) input.value = '';
+
+  checkAlarms();
+
+  // Calendar side-effects (non-blocking, don't hold UI)
+  // For each item with a date, if calendar toggle ON try API insert; always also ensure ICS is reachable via toast action if desired
+  var calendarTasks = createdIds.filter(function (c) { return c.alarmAt; });
+  if (calendarTasks.length) {
+    if (isCalendarEnabled()) {
+      // Fire sequentially to avoid rate issues
+      (async function () {
+        for (var i = 0; i < calendarTasks.length; i++) {
+          // eslint-disable-next-line no-await-in-loop
+          await createCalendarEvent(calendarTasks[i]);
+        }
+      })();
+    } else {
+      toast('Reminders have ICS. Turn on Calendar to add events automatically.', {
+        duration: 6000,
+        actionLabel: 'HOW',
+        onAction: function () { openCalendarTemplate(calendarTasks[0]); }
+      });
+    }
+  }
+}
+
+function bindAiBar() {
+  var btn = document.getElementById('ai-generate-btn');
+  var input = document.getElementById('ai-input');
+  var aiToggle = document.getElementById('toggle-ai');
+  var calToggle = document.getElementById('toggle-calendar');
+
+  if (btn) btn.addEventListener('click', runAiGenerate);
+  if (input) {
+    input.addEventListener('keydown', function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+        e.preventDefault();
+        runAiGenerate();
+      }
+    });
+  }
+  if (aiToggle) {
+    aiToggle.addEventListener('change', function () {
+      try { localStorage.setItem(AI_KEY, aiToggle.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+      setToggleState();
+      if (aiToggle.checked) {
+        toast('AI on — 100% free, on-device.', { duration: 3000 });
+        // Optionally warm the parser
+        loadAi().catch(function () { });
+      } else {
+        toast('AI off.', { duration: 2000 });
+        var h = document.getElementById('ai-hint');
+        if (h) h.textContent = 'Heuristic · 100% free · Offline + online · Creates tasks with title, description, alarm and calendar';
+      }
+    });
+  }
+  if (calToggle) {
+    calToggle.addEventListener('change', function () {
+      try { localStorage.setItem(CAL_KEY, calToggle.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+      setToggleState();
+      if (calToggle.checked) toast('Calendar on — will use same sign-in to add events.', { duration: 3000 });
+      else toast('Calendar off — ICS only.', { duration: 2000 });
+    });
+  }
+}
+
 /* ---------- Master render ---------------------------------------------- */
 
 /* Full-redraw rendering is intentional: it is simple and the data set is
@@ -2171,12 +2453,16 @@ function renderAll() {
 initServiceWorker();
 renderAll();
 initAlarmCheck();
+setToggleState();
+bindAiBar();
 
 if (!storageAvailable) {
   toast('Browser storage is blocked, so nothing will be saved after you close this tab.', { duration: 9000 });
 }
 
 /* ---------- Public hooks for sync.js ------------------------------------ */
+
+window.PersonalOS_AI_STATE = { isAiEnabled: isAiEnabled, isCalendarEnabled: isCalendarEnabled, loadAi: loadAi, buildCalendarTemplateUrl: buildCalendarTemplateUrl, createCalendarEvent: createCalendarEvent, openCalendarTemplate: openCalendarTemplate };
 
 window.PersonalOS = {
   getState: () => state,
