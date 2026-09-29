@@ -1,0 +1,9 @@
+{
+  "name": "NOTE-TAKER",
+  "short_name": "NoteTaker",
+  "description": "Offline-first note-taking and task tracker web app built with vanilla JavaScript.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#111111"
+}
