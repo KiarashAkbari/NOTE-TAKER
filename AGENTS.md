@@ -81,6 +81,15 @@ Load order is load-bearing. `app.js` must run before `sync.js`.
   `change` handlers and the quick-preset buttons). Never request on page load
   or an unrelated click. There is intentionally no service worker:
   notifications only exist while the app is open, and privacy.html says so.
+- Daily reports (`buildReportMarkdown`) are derived from state on the tap and
+  never persisted — no report history, no new storage key. Delivery goes
+  through the `REPORT_TARGETS` registry (`download`, `clipboard`): both are
+  local-only. Any future network-backed target (GitHub, Drive, …) is a new
+  registry entry **plus** a privacy.html change, a CSP `connect-src` update and
+  a new opt-in UI — all in the same commit. "Done today" is inferred from
+  `updatedAt` (the schema has no dedicated completion stamp); the report says
+  so rather than overclaiming. There is intentionally **no scheduled/auto
+  delivery** — a tap is the trigger.
 - `openDialog()` / `closeDialog()` maintain `dialogStack` and are guarded
   against double-push; `confirmAction()` rejects a second concurrent call.
   `closeDialog()` blurs focus still inside the closing dialog — otherwise

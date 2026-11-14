@@ -12,7 +12,7 @@ SYSTEM_STATUS:    OPERATIONAL
 SOURCE_OF_TRUTH:  localStorage['personal-os-v1']
 SYNC_LAYER:       GOOGLE_DRIVE_APPDATAFOLDER (OPT-IN)
 BACKEND:          NONE — THERE IS NO SERVER TO TRUST
-PAYLOAD:          5 CORE FILES (+ MANIFEST & PWA ICONS) · ~37 KB GZIPPED
+PAYLOAD:          5 CORE FILES (+ MANIFEST & PWA ICONS) · ~39 KB GZIPPED
 ```
 
 **[ LIVE_SYSTEM ]** → **https://kiarashakbari.github.io/NOTE-TAKER/** ·
@@ -23,10 +23,10 @@ PAYLOAD:          5 CORE FILES (+ MANIFEST & PWA ICONS) · ~37 KB GZIPPED
 
 ## // 01_SYSTEM_OVERVIEW
 
-**PERSONAL OS** is a notes, task-board, tag-organizer, and reminder-alarm app
-that ships as five static files plus a PWA manifest and icons. No framework. No
-bundler. No `node_modules`. No account. No server. Open the page and it works,
-instantly.
+**PERSONAL OS** is a notes, task-board, tag-organizer, reminder-alarm, and
+daily-report app that ships as five static files plus a PWA manifest and
+icons. No framework. No bundler. No `node_modules`. No account. No server.
+Open the page and it works, instantly.
 
 Your data lives in your browser. If you want the same data on your phone, you
 tap SIGN IN and it mirrors to a hidden file in **your own** Google Drive. Not a
@@ -46,8 +46,8 @@ files; a local clone needs nothing at all.)
 | Backend services | **0** |
 | Analytics / telemetry / trackers | **0** |
 | Third-party requests before you sign in | **0** |
-| Total source (app core, uncompressed) | **~130 KB** |
-| Wire weight of the app itself, gzipped | **~37 KB** |
+| Total source (app core, uncompressed) | **~138 KB** |
+| Wire weight of the app itself, gzipped | **~39 KB** |
 | Monthly cost to run | **$0** |
 
 ### [ CORE_CAPABILITIES ]
@@ -78,6 +78,12 @@ files; a local clone needs nothing at all.)
 > notification (permission asked only when you touch the reminder controls),
 > and a downloadable `.ics` with a `VALARM` reminder. Alarms survive across
 > tabs without double-ringing.
+>
+> **DAILY REPORT, ONE TAP:** ↓ DAILY REPORT (or ⧉ COPY REPORT) writes a
+> plain-Markdown summary of *today* — done, created, notes touched with word
+> counts, tags in play, reminders for the next 24h — generated on-device,
+> saved as a file or copied to your clipboard. Nothing runs unless you tap;
+> nothing is sent anywhere.
 >
 > **FORWARD-COMPATIBLE STATE:** An old browser cannot strip a newer schema's
 > fields and push the lossy copy back over your good data.
@@ -130,6 +136,7 @@ Load order is load-bearing: `app.js` owns the data, `sync.js` only mirrors it.
 | Reminder helpers live at module scope | Renderers, quick-select and the alarms bar all call them; nested once, they compiled fine and threw `ReferenceError` at runtime. |
 | Notification permission is requested only from a user gesture at the reminder UI | Asking on an unrelated first click gets the permission dismissed forever. |
 | Due alarms are re-announced once per browser via a `pos-fired-alarms` marker | Two open tabs run the same 1s ticker; the marker stops a double ring without a backend. |
+| Daily reports are derived on demand and never persisted | `REPORT_TARGETS` is the delivery seam: today it holds `download` + `clipboard` (local only). A network target means a privacy.html + CSP update in the same commit. |
 
 ---
 
@@ -243,7 +250,9 @@ rejected. Deleting a tag prunes it from every item that referenced it — and is
 undoable.
 
 Also the data console: **EXPORT BACKUP** (plain JSON, downloaded locally),
-**IMPORT BACKUP**, and **DELETE ALL DATA**, plus a readout of how many bytes
+**IMPORT BACKUP**, **↓ DAILY REPORT** (a Markdown summary of today — what you
+finished, created, wrote and have coming up), **⧉ COPY REPORT** (same report,
+to the clipboard), and **DELETE ALL DATA**, plus a readout of how many bytes
 you're actually using.
 
 ### [ SEARCH_&_FILTER ]
@@ -389,7 +398,8 @@ Ground rules for anyone (or anything) sending a patch. Full detail lives in
 >> COOKIES:             NONE
 >> THIRD_PARTIES:       GOOGLE, ONLY AFTER YOU TAP SIGN IN
 >> OAUTH_SCOPE:         drive.appdata (THIS APP'S HIDDEN FOLDER ONLY)
->> EXPORT:              PLAIN JSON, ONE CLICK, LOCAL
+>> EXPORT:              PLAIN JSON BACKUP / MARKDOWN DAILY REPORT,
+                        ONE CLICK, LOCAL — REPORT IS NEVER SENT OR STORED
 >> NOTIFICATIONS:       LOCAL ONLY (APP OPEN), ONLY AFTER YOU GRANT PERMISSION,
                         ONLY FOR DUE REMINDERS
 >> DELETE:              IN-APP, OR REVOKE ACCESS AT

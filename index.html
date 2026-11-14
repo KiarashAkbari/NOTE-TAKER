@@ -142,11 +142,13 @@
       <div class="section-block">
         <div class="section-title">DATA · YOURS, ALWAYS</div>
         <p class="section-note">
-          Everything lives in this browser. Export a full JSON backup any time — no account, no lock-in, no cost.
+          Everything lives in this browser. Export a full JSON backup any time — no account, no lock-in, no cost. Or hit ↓ DAILY REPORT for a Markdown summary of your day.
         </p>
         <div class="button-row">
           <button type="button" class="btn-ghost" id="export-btn">↓ EXPORT BACKUP</button>
           <button type="button" class="btn-ghost" id="import-btn">↑ IMPORT BACKUP</button>
+          <button type="button" class="btn-ghost" id="report-btn" title="Download a Markdown report of today — done, created, touched, reminders">↓ DAILY REPORT</button>
+          <button type="button" class="btn-ghost" id="report-copy-btn" title="Copy the same report to the clipboard">⧉ COPY REPORT</button>
           <button type="button" class="btn-danger" id="reset-btn">✕ DELETE ALL DATA</button>
         </div>
         <input type="file" id="import-file" accept="application/json,.json" class="sr-only" aria-hidden="true" tabindex="-1">

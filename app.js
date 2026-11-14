@@ -242,6 +242,8 @@ const els = {
   importBtn: document.getElementById('import-btn'),
   importFile: document.getElementById('import-file'),
   resetBtn: document.getElementById('reset-btn'),
+  reportBtn: document.getElementById('report-btn'),
+  reportCopyBtn: document.getElementById('report-copy-btn'),
   modalBackdrop: document.getElementById('modal-backdrop'),
   modalForm: document.getElementById('modal-form'),
   modalTitle: document.getElementById('modal-title'),
@@ -1410,16 +1412,8 @@ els.newTagInput.addEventListener('keydown', e => {
    This is the escape hatch that keeps the app free of lock-in. */
 els.exportBtn.addEventListener('click', () => {
   const payload = JSON.stringify({ ...state, exportedAt: new Date().toISOString() }, null, 2);
-  const blob = new Blob([payload], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
   const stamp = new Date().toISOString().slice(0, 10);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `personal-os-backup-${stamp}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  downloadTextFile(`personal-os-backup-${stamp}.json`, payload, 'application/json');
   toast('Backup downloaded.', { duration: 3000 });
 });
 
@@ -1510,6 +1504,187 @@ els.resetBtn.addEventListener('click', async () => {
     },
   });
 });
+
+/* ---------- Daily report (explicit tap only; nothing runs by itself) -------
+
+   A plain-Markdown summary of the current local day, generated from state at
+   the moment you tap. Reports are derived on demand and never persisted —
+   there is no report history in localStorage to go stale.
+
+   Delivery is deliberately pluggable: REPORT_TARGETS maps a target id to a
+   deliver(markdown) function. Shipping today: download + clipboard (both
+   fully local). Adding e.g. a GitHub commit or Drive upload later means one
+   new entry here plus its config UI — and, because it would touch the
+   network, a privacy.html + CSP update in the same commit. */
+
+const WEEKDAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+
+function startOfLocalDay(ts) {
+  const d = new Date(ts);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+function cleanLine(s) {
+  return String(s || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function countWords(s) {
+  const t = String(s || '').trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+function buildReportMarkdown(nowTs = Date.now()) {
+  const now = new Date(nowTs);
+  const dayStart = startOfLocalDay(nowTs);
+  const dayEnd = dayStart + 86400000;
+  const inToday = ts => Number.isFinite(ts) && ts >= dayStart && ts < dayEnd;
+  const today = toLocalDate(nowTs);
+
+  /* "Done today" cannot be derived from a dedicated timestamp (the schema has
+     none), only from updatedAt — so a task done *any* prior day but touched
+     today counts, and we say so in the report instead of overclaiming. */
+  const doneToday = state.tasks.filter(t => t.status === 'done' && inToday(t.updatedAt));
+  const createdToday = [
+    ...state.tasks.filter(t => inToday(t.createdAt)).map(t => ({ kind: 'task', title: t.title, createdAt: t.createdAt })),
+    ...state.notes.filter(n => inToday(n.createdAt)).map(n => ({ kind: 'note', title: n.title, createdAt: n.createdAt })),
+  ].sort((a, b) => a.createdAt - b.createdAt);
+  const notesTouched = state.notes.filter(n => inToday(n.updatedAt)).sort((a, b) => b.updatedAt - a.updatedAt);
+  const wordsToday = notesTouched.reduce((sum, n) => sum + countWords(n.body), 0);
+  const openTasks = state.tasks.filter(t => t.status !== 'done');
+  const inProgress = state.tasks.filter(t => t.status === 'in_progress');
+
+  const tagsInPlay = new Set();
+  state.notes.filter(n => inToday(n.updatedAt)).forEach(n => (n.tagIds || []).forEach(id => tagsInPlay.add(id)));
+  state.tasks.filter(t => inToday(t.updatedAt)).forEach(t => (t.tagIds || []).forEach(id => tagsInPlay.add(id)));
+  const tagNames = [...tagsInPlay]
+    .map(id => (tagsById.get(id) || {}).name)
+    .filter(Boolean)
+    .map(n => n.toUpperCase());
+
+  const horizon = nowTs + 86400000;
+  const upcoming = [...state.notes, ...state.tasks]
+    .filter(i => i.alarmAt && i.alarmAt >= dayStart && i.alarmAt < horizon)
+    .sort((a, b) => a.alarmAt - b.alarmAt);
+
+  const md = [];
+  md.push(`# DAILY REPORT — ${WEEKDAYS[now.getDay()]} ${today}`);
+  md.push('');
+  md.push(`PERSONAL OS · generated ${toLocalTime(nowTs)} local · produced on this device — nothing was sent anywhere`);
+  md.push('');
+
+  md.push('## ✅ DONE TODAY');
+  md.push('(item is DONE and was touched today)');
+  if (doneToday.length) doneToday.forEach(t => md.push(`- [task] ${cleanLine(t.title) || 'Untitled'}`));
+  else md.push('- (nothing moved to done today)');
+  md.push('');
+
+  md.push('## ➕ CREATED TODAY');
+  if (createdToday.length) createdToday.forEach(i => md.push(`- [${i.kind}] ${cleanLine(i.title) || 'Untitled'} — ${toLocalTime(i.createdAt)}`));
+  else md.push('- (nothing created today)');
+  md.push('');
+
+  md.push('## 📝 NOTES TOUCHED TODAY');
+  if (notesTouched.length) {
+    notesTouched.forEach(n => {
+      md.push(`- ${cleanLine(n.title) || 'UNTITLED'} — ${countWords(n.body)} words${inToday(n.createdAt) ? ' (new)' : ' (edited)'} · ${toLocalTime(n.updatedAt)}`);
+    });
+    md.push(`- total: ${wordsToday} words across ${notesTouched.length} note${notesTouched.length === 1 ? '' : 's'}`);
+  } else {
+    md.push('- (no notes touched today)');
+  }
+  md.push('');
+
+  md.push('## 🏷 TAGS IN PLAY TODAY');
+  md.push(tagNames.length ? `- ${tagNames.join(' · ')}` : '- (none)');
+  md.push('');
+
+  md.push('## ⏰ REMINDERS — TODAY & NEXT 24H');
+  if (upcoming.length) {
+    upcoming.forEach(i => {
+      const kind = state.notes.includes(i) ? 'note' : 'task';
+      const label = cleanLine(i.alarmLabel || '');
+      md.push(`- ${toLocalDate(i.alarmAt)} ${toLocalTime(i.alarmAt)} — ${cleanLine(i.title) || 'Untitled'}${label ? ' — ' + label : ''} (${kind})`);
+    });
+  } else {
+    md.push('- (none scheduled)');
+  }
+  md.push('');
+
+  md.push('## SNAPSHOT');
+  md.push(`- Open tasks: ${openTasks.length} (${inProgress.length} in progress) · Notes: ${state.notes.length} · Tags: ${state.tags.length}`);
+  md.push(`- Words in today's notes: ${wordsToday}`);
+  md.push('');
+  md.push('---');
+  md.push('Generated locally by PERSONAL OS. No data left this browser.');
+  md.push('');
+  return md.join('\n');
+}
+
+function downloadTextFile(filename, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+const REPORT_TARGETS = {
+  download: {
+    deliver: md => { downloadTextFile(`personal-os-report-${toLocalDate(Date.now())}.md`, md, 'text/markdown;charset=utf-8'); return 'Report downloaded.'; },
+  },
+  clipboard: {
+    deliver: async md => {
+      const ok = await copyTextToClipboard(md);
+      if (!ok) throw new Error('clipboard unavailable');
+      return 'Report copied to clipboard.';
+    },
+  },
+};
+
+async function deliverReport(targetId) {
+  const target = REPORT_TARGETS[targetId];
+  if (!target) return;
+  /* Build from a consistent snapshot: the app is synchronous, so a tap can
+     never observe a half-written state anyway — but capture `now` once so
+     the filename and the header agree. */
+  const nowTs = Date.now();
+  const md = buildReportMarkdown(nowTs);
+  try {
+    const message = await target.deliver(md);
+    toast(message, { duration: 3000 });
+  } catch (e) {
+    toast('Could not deliver the report — nothing was sent or changed.', { duration: 5000 });
+  }
+}
+
+if (els.reportBtn) els.reportBtn.addEventListener('click', () => deliverReport('download'));
+if (els.reportCopyBtn) els.reportCopyBtn.addEventListener('click', () => deliverReport('clipboard'));
 
 /* ---------- Readouts ---------------------------------------------------- */
 
