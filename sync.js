@@ -38,6 +38,7 @@ let remoteFileId = null;
 let tokenClient = null;
 let gsiPromise = null;
 let syncing = false;
+let duplicateNoticeShown = false;
 
 const syncEls = { btn: null, light: null, status: null };
 
@@ -222,10 +223,11 @@ function authHeaders() {
   return { Authorization: `Bearer ${accessToken}` };
 }
 
-// If any Drive call comes back unauthorized, the token has actually expired —
-// surface "reconnect" instead of erroring silently.
+// Only 401 means "the token was rejected". A 403 is Drive refusing this
+// request (API disabled, quota, forbidden) — calling that "session expired"
+// sends the user down the wrong road.
 function isAuthError(res) {
-  return res.status === 401 || res.status === 403;
+  return res.status === 401;
 }
 
 async function findRemoteFile() {
@@ -236,7 +238,14 @@ async function findRemoteFile() {
   if (isAuthError(res)) throw new AuthExpiredError();
   if (!res.ok) throw new Error('drive list failed');
   const data = await res.json();
-  return data.files && data.files.length ? data.files[0] : null;
+  const files = Array.isArray(data.files) ? data.files : [];
+  if (files.length > 1 && !duplicateNoticeShown) {
+    // Never silently keep two diverging copies — but never auto-delete either:
+    // either could hold something the other lost. Tell the user once per session.
+    duplicateNoticeShown = true;
+    notify('Multiple backup files found in your Drive app folder. Using the newest — nothing was deleted.', { duration: 8000 });
+  }
+  return files.length ? files[0] : null;
 }
 
 async function downloadRemote(fileId) {
@@ -336,20 +345,25 @@ async function performInitialSync({ announce = false } = {}) {
     }
     setSyncState('synced');
   } catch (e) {
-    handleSyncError(e);
+    handleSyncError(e, { announce });
   } finally {
     syncing = false;
   }
 }
 
-function handleSyncError(e) {
+function handleSyncError(e, { announce = false } = {}) {
   if (e instanceof AuthExpiredError) {
     accessToken = null;
     clearCachedToken();
     setSyncState('expired');
     notify('Google session expired. Tap SYNC to reconnect — nothing was lost.', { duration: 7000 });
-  } else {
-    setSyncState('error');
+    return;
+  }
+  setSyncState('error');
+  // Background pushes stay quiet (the ERROR dot tells the story); surface a
+  // toast only when the user explicitly initiated a sync.
+  if (announce) {
+    notify('Google Drive did not accept the request — your data is safe locally.', { duration: 7000 });
   }
 }
 
@@ -380,12 +394,21 @@ async function runPush() {
 
 window.addEventListener('pos:save', schedulePush);
 
-// A pending debounced push would otherwise be lost on navigation.
-window.addEventListener('pagehide', () => {
-  if (accessToken && pushDebounce) {
-    clearTimeout(pushDebounce);
-    runPush();
-  }
+/* Flush a pending debounced push as the tab goes away. Best-effort in both
+   cases: the browser may cut an in-flight fetch short as the page unloads, and
+   no keepalive trick is used because a note body can exceed the ~64 KB
+   keepalive limit. Flushing on visibilitychange usually fires earlier than
+   pagehide, which is what actually saves the push on most browsers. */
+function flushPendingPush() {
+  if (!accessToken || !pushDebounce) return;
+  clearTimeout(pushDebounce);
+  pushDebounce = null;
+  runPush();
+}
+
+window.addEventListener('pagehide', flushPendingPush);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushPendingPush();
 });
 
 // Coming back online after a failure should recover without a click, since

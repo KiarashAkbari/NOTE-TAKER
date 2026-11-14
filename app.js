@@ -14,10 +14,17 @@
      must pass through escapeHtml()/escapeAttr().
    - The app must keep working with zero network access. No dependencies,
      no build step, no accounts, no cost. Keep it that way.
+   - Helpers called from renderers (pad, toLocalDate/Time, timeRemaining) live
+     at module scope. Nesting them inside another function compiles fine but
+     dies at runtime with ReferenceError — that shipped once already.
+   - Notification permission is only ever requested from a user gesture at the
+     moment they engage the reminder UI, and only used for due alarms while
+     the app is open.
    ========================================================================== */
 
 const STORAGE_KEY = 'personal-os-v1';
 const THEME_KEY = 'pos-theme';
+const FIRED_ALARMS_KEY = 'pos-fired-alarms';
 const SCHEMA_VERSION = 2;
 
 const STATUS_ORDER = ['not_started', 'in_progress', 'done'];
@@ -107,7 +114,23 @@ function sanitizeState(raw) {
     ? src.version
     : SCHEMA_VERSION;
 
-  return { version, notes, tasks, tags, meta: { updatedAt } };
+  /* Carry unknown keys untouched — items already do this via carryUnknown,
+     and the same promise is made for the state envelope and meta, so an
+     older browser never strips a newer schema's data on a Drive round-trip. */
+  const rawMeta = src.meta && typeof src.meta === 'object' ? src.meta : {};
+  const meta = {};
+  Object.keys(rawMeta).forEach(k => {
+    if (k === '__proto__' || k === 'updatedAt') return;
+    meta[k] = rawMeta[k];
+  });
+  meta.updatedAt = updatedAt;
+
+  const out = { version, notes, tasks, tags, meta };
+  Object.keys(src).forEach(k => {
+    if (k === '__proto__' || ['version', 'notes', 'tasks', 'tags', 'meta'].includes(k)) return;
+    out[k] = src[k];
+  });
+  return out;
 }
 
 let storageAvailable = true;
@@ -219,6 +242,8 @@ const els = {
   importBtn: document.getElementById('import-btn'),
   importFile: document.getElementById('import-file'),
   resetBtn: document.getElementById('reset-btn'),
+  reportBtn: document.getElementById('report-btn'),
+  reportCopyBtn: document.getElementById('report-copy-btn'),
   modalBackdrop: document.getElementById('modal-backdrop'),
   modalForm: document.getElementById('modal-form'),
   modalTitle: document.getElementById('modal-title'),
@@ -261,19 +286,14 @@ function escapeAttr(str) {
 }
 
 /* Local time, not UTC — the old ISO slice showed the wrong day for anyone
-   east/west of GMT late in the day. */
-function formatDate(ts) {
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return '—';
-  const diff = Date.now() - ts;
-  const min = 60000, hour = 3600000, day = 86400000;
-  if (diff >= 0 && diff < min) return 'JUST NOW';
-  if (diff >= 0 && diff < hour) return `${Math.floor(diff / min)}M AGO`;
-  if (diff >= 0 && diff < day) return `${Math.floor(diff / hour)}H AGO`;
-  if (diff >= 0 && diff < 7 * day) return `${Math.floor(diff / day)}D AGO`;
-  const pad = n => String(n).padStart(2, '0');
-const toLocalDate = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; };
+   east/west of GMT late in the day. These helpers are module-scope on
+   purpose: renderers, quick-select and the alarm bar all call them, and
+   nesting them inside another function silently produced ReferenceErrors. */
+const pad = n => String(n).padStart(2, '0');
+const toLocalDate = ts => { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 const toLocalTime = ts => { const d = new Date(ts); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+
+/* Time remaining until a timestamp, used by alarm badges + countdowns. */
 function timeRemaining(ts) {
   const diff = ts - Date.now();
   if (diff <= 0) return 'ALARM';
@@ -283,6 +303,16 @@ function timeRemaining(ts) {
   if (hour < 24) return `${hour}H`;
   return `${Math.floor(diff / 86400000)}D`;
 }
+
+function formatDate(ts) {
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '—';
+  const diff = Date.now() - ts;
+  const min = 60000, hour = 3600000, day = 86400000;
+  if (diff >= 0 && diff < min) return 'JUST NOW';
+  if (diff >= 0 && diff < hour) return `${Math.floor(diff / min)}M AGO`;
+  if (diff >= 0 && diff < day) return `${Math.floor(diff / hour)}H AGO`;
+  if (diff >= 0 && diff < 7 * day) return `${Math.floor(diff / day)}D AGO`;
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
@@ -1382,16 +1412,8 @@ els.newTagInput.addEventListener('keydown', e => {
    This is the escape hatch that keeps the app free of lock-in. */
 els.exportBtn.addEventListener('click', () => {
   const payload = JSON.stringify({ ...state, exportedAt: new Date().toISOString() }, null, 2);
-  const blob = new Blob([payload], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
   const stamp = new Date().toISOString().slice(0, 10);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `personal-os-backup-${stamp}.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  downloadTextFile(`personal-os-backup-${stamp}.json`, payload, 'application/json');
   toast('Backup downloaded.', { duration: 3000 });
 });
 
@@ -1482,6 +1504,187 @@ els.resetBtn.addEventListener('click', async () => {
     },
   });
 });
+
+/* ---------- Daily report (explicit tap only; nothing runs by itself) -------
+
+   A plain-Markdown summary of the current local day, generated from state at
+   the moment you tap. Reports are derived on demand and never persisted —
+   there is no report history in localStorage to go stale.
+
+   Delivery is deliberately pluggable: REPORT_TARGETS maps a target id to a
+   deliver(markdown) function. Shipping today: download + clipboard (both
+   fully local). Adding e.g. a GitHub commit or Drive upload later means one
+   new entry here plus its config UI — and, because it would touch the
+   network, a privacy.html + CSP update in the same commit. */
+
+const WEEKDAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+
+function startOfLocalDay(ts) {
+  const d = new Date(ts);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+function cleanLine(s) {
+  return String(s || '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function countWords(s) {
+  const t = String(s || '').trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+function buildReportMarkdown(nowTs = Date.now()) {
+  const now = new Date(nowTs);
+  const dayStart = startOfLocalDay(nowTs);
+  const dayEnd = dayStart + 86400000;
+  const inToday = ts => Number.isFinite(ts) && ts >= dayStart && ts < dayEnd;
+  const today = toLocalDate(nowTs);
+
+  /* "Done today" cannot be derived from a dedicated timestamp (the schema has
+     none), only from updatedAt — so a task done *any* prior day but touched
+     today counts, and we say so in the report instead of overclaiming. */
+  const doneToday = state.tasks.filter(t => t.status === 'done' && inToday(t.updatedAt));
+  const createdToday = [
+    ...state.tasks.filter(t => inToday(t.createdAt)).map(t => ({ kind: 'task', title: t.title, createdAt: t.createdAt })),
+    ...state.notes.filter(n => inToday(n.createdAt)).map(n => ({ kind: 'note', title: n.title, createdAt: n.createdAt })),
+  ].sort((a, b) => a.createdAt - b.createdAt);
+  const notesTouched = state.notes.filter(n => inToday(n.updatedAt)).sort((a, b) => b.updatedAt - a.updatedAt);
+  const wordsToday = notesTouched.reduce((sum, n) => sum + countWords(n.body), 0);
+  const openTasks = state.tasks.filter(t => t.status !== 'done');
+  const inProgress = state.tasks.filter(t => t.status === 'in_progress');
+
+  const tagsInPlay = new Set();
+  state.notes.filter(n => inToday(n.updatedAt)).forEach(n => (n.tagIds || []).forEach(id => tagsInPlay.add(id)));
+  state.tasks.filter(t => inToday(t.updatedAt)).forEach(t => (t.tagIds || []).forEach(id => tagsInPlay.add(id)));
+  const tagNames = [...tagsInPlay]
+    .map(id => (tagsById.get(id) || {}).name)
+    .filter(Boolean)
+    .map(n => n.toUpperCase());
+
+  const horizon = nowTs + 86400000;
+  const upcoming = [...state.notes, ...state.tasks]
+    .filter(i => i.alarmAt && i.alarmAt >= dayStart && i.alarmAt < horizon)
+    .sort((a, b) => a.alarmAt - b.alarmAt);
+
+  const md = [];
+  md.push(`# DAILY REPORT — ${WEEKDAYS[now.getDay()]} ${today}`);
+  md.push('');
+  md.push(`PERSONAL OS · generated ${toLocalTime(nowTs)} local · produced on this device — nothing was sent anywhere`);
+  md.push('');
+
+  md.push('## DONE TODAY');
+  md.push('(item is DONE and was touched today)');
+  if (doneToday.length) doneToday.forEach(t => md.push(`- [task] ${cleanLine(t.title) || 'Untitled'}`));
+  else md.push('- (nothing moved to done today)');
+  md.push('');
+
+  md.push('## CREATED TODAY');
+  if (createdToday.length) createdToday.forEach(i => md.push(`- [${i.kind}] ${cleanLine(i.title) || 'Untitled'} — ${toLocalTime(i.createdAt)}`));
+  else md.push('- (nothing created today)');
+  md.push('');
+
+  md.push('## NOTES TOUCHED TODAY');
+  if (notesTouched.length) {
+    notesTouched.forEach(n => {
+      md.push(`- ${cleanLine(n.title) || 'UNTITLED'} — ${countWords(n.body)} words${inToday(n.createdAt) ? ' (new)' : ' (edited)'} · ${toLocalTime(n.updatedAt)}`);
+    });
+    md.push(`- total: ${wordsToday} words across ${notesTouched.length} note${notesTouched.length === 1 ? '' : 's'}`);
+  } else {
+    md.push('- (no notes touched today)');
+  }
+  md.push('');
+
+  md.push('## TAGS IN PLAY TODAY');
+  md.push(tagNames.length ? `- ${tagNames.join(' · ')}` : '- (none)');
+  md.push('');
+
+  md.push('## REMINDERS — TODAY & NEXT 24H');
+  if (upcoming.length) {
+    upcoming.forEach(i => {
+      const kind = state.notes.includes(i) ? 'note' : 'task';
+      const label = cleanLine(i.alarmLabel || '');
+      md.push(`- ${toLocalDate(i.alarmAt)} ${toLocalTime(i.alarmAt)} — ${cleanLine(i.title) || 'Untitled'}${label ? ' — ' + label : ''} (${kind})`);
+    });
+  } else {
+    md.push('- (none scheduled)');
+  }
+  md.push('');
+
+  md.push('## SNAPSHOT');
+  md.push(`- Open tasks: ${openTasks.length} (${inProgress.length} in progress) · Notes: ${state.notes.length} · Tags: ${state.tags.length}`);
+  md.push(`- Words in today's notes: ${wordsToday}`);
+  md.push('');
+  md.push('---');
+  md.push('Generated locally by PERSONAL OS. No data left this browser.');
+  md.push('');
+  return md.join('\n');
+}
+
+function downloadTextFile(filename, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function copyTextToClipboard(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) { /* fall through to the legacy path */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+const REPORT_TARGETS = {
+  download: {
+    deliver: md => { downloadTextFile(`personal-os-report-${toLocalDate(Date.now())}.md`, md, 'text/markdown;charset=utf-8'); return 'Report downloaded.'; },
+  },
+  clipboard: {
+    deliver: async md => {
+      const ok = await copyTextToClipboard(md);
+      if (!ok) throw new Error('clipboard unavailable');
+      return 'Report copied to clipboard.';
+    },
+  },
+};
+
+async function deliverReport(targetId) {
+  const target = REPORT_TARGETS[targetId];
+  if (!target) return;
+  /* Build from a consistent snapshot: the app is synchronous, so a tap can
+     never observe a half-written state anyway — but capture `now` once so
+     the filename and the header agree. */
+  const nowTs = Date.now();
+  const md = buildReportMarkdown(nowTs);
+  try {
+    const message = await target.deliver(md);
+    toast(message, { duration: 3000 });
+  } catch (e) {
+    toast('Could not deliver the report — nothing was sent or changed.', { duration: 5000 });
+  }
+}
+
+if (els.reportBtn) els.reportBtn.addEventListener('click', () => deliverReport('download'));
+if (els.reportCopyBtn) els.reportCopyBtn.addEventListener('click', () => deliverReport('clipboard'));
 
 /* ---------- Readouts ---------------------------------------------------- */
 
@@ -1612,6 +1815,19 @@ function updateAlarmDisplay() {
   display.textContent = alarmAt ? 'ALARM SET: ' + formatDate(alarmAt) : '';
 }
 
+/* Permission is requested here — and only here — i.e. from a real gesture at
+   the moment the user engages the reminder UI. Never on an unrelated first
+   click: the permission would have no context, and browsers penalise exactly
+   that. */
+function ensureNotificationPermission() {
+  if (!('Notification' in window)) return;
+  if (Notification.permission !== 'default') return;
+  try {
+    const p = Notification.requestPermission();
+    if (p && typeof p.catch === 'function') p.catch(() => { /* user dismissed */ });
+  } catch (e) { /* older signature without promise — nothing useful to do */ }
+}
+
 function attachQuickSelect() {
   document.querySelectorAll('.alarm-quick .tag-chip').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -1619,24 +1835,36 @@ function attachQuickSelect() {
       const timeEl = document.getElementById('field-alarm-time');
       if (!dateEl || !timeEl) return;
       const now = new Date();
-      let target = new Date(now);
+      const target = new Date(now);
       switch (chip.dataset.quick) {
-        case 'today': break;
+        case 'today': {
+          // Round up to the next hour, but never fall into tomorrow: a 23:30
+          // "TODAY" tap means later today, not 00:00 next day.
+          target.setMinutes(0, 0, 0);
+          target.setHours(target.getHours() + 1);
+          if (target.getDate() !== now.getDate()) {
+            target.setTime(new Date(now).setHours(23, 59, 0, 0));
+          }
+          break;
+        }
         case 'tomorrow': target.setDate(target.getDate() + 1); break;
         case 'week': target.setDate(target.getDate() + 7); break;
         case 'month': target.setMonth(target.getMonth() + 1); break;
       }
-      target.setMinutes(0, 0, 0);
-      target.setHours(target.getHours() + 1);
+      if (chip.dataset.quick !== 'today') {
+        target.setMinutes(0, 0, 0);
+        target.setHours(target.getHours() + 1);
+      }
       dateEl.value = toLocalDate(target.getTime());
       timeEl.value = toLocalTime(target.getTime());
       updateAlarmDisplay();
+      ensureNotificationPermission();
     });
   });
   const dateEl = document.getElementById('field-alarm-date');
   const timeEl = document.getElementById('field-alarm-time');
-  if (dateEl) dateEl.addEventListener('change', updateAlarmDisplay);
-  if (timeEl) timeEl.addEventListener('change', updateAlarmDisplay);
+  if (dateEl) dateEl.addEventListener('change', () => { updateAlarmDisplay(); ensureNotificationPermission(); });
+  if (timeEl) timeEl.addEventListener('change', () => { updateAlarmDisplay(); ensureNotificationPermission(); });
 }
 
 /* ---------- Alarm / Reminder + Calendar --------------------------------- */
@@ -1644,11 +1872,33 @@ let alarmInterval = null;
 let notifiedAlarms = new Set();
 
 function initAlarmCheck() {
-  if ('Notification' in window && Notification.permission === 'default') {
-    document.addEventListener('click', () => { Notification.requestPermission(); }, { once: true });
-  }
+  /* No Notification permission request here. It is requested only when the
+     user engages the reminder UI (see ensureNotificationPermission) — asking
+     on an unrelated first click teaches people to distrust the app. */
   checkAlarms();
   alarmInterval = setInterval(checkAlarms, 1000);
+}
+
+/* Two open tabs share the same 1s ticker; without coordination both would
+   ring the same alarm. A synchronous localStorage marker is the simplest
+   mutual exclusion available. Entries expire after a day so the key never
+   accumulates. */
+function claimFiredAlarm(id, at) {
+  if (!storageAvailable) return true; // better to double-ring than swallow an alarm
+  try {
+    const now = Date.now();
+    let map = {};
+    try { map = JSON.parse(localStorage.getItem(FIRED_ALARMS_KEY)) || {}; } catch (_) { map = {}; }
+    if (!map || typeof map !== 'object' || Array.isArray(map)) map = {};
+    Object.keys(map).forEach(k => { if (!Number.isFinite(map[k]) || now - map[k] > 86400000) delete map[k]; });
+    const key = id + ':' + at;
+    if (map[key]) return false;
+    map[key] = now;
+    localStorage.setItem(FIRED_ALARMS_KEY, JSON.stringify(map));
+    return true;
+  } catch (e) {
+    return true; // storage blocked — fire anyway
+  }
 }
 
 function checkAlarms() {
@@ -1657,14 +1907,19 @@ function checkAlarms() {
     const toFire = [...state.notes, ...state.tasks].filter(
       item => item.alarmAt && !notifiedAlarms.has(item.id) && item.alarmAt <= now
     );
-    toFire.forEach(item => {
-      notifiedAlarms.add(item.id);
-      fireAlarm(item);
-      item.alarmAt = null;
-      item.alarmLabel = '';
-      saveState();
-    });
-    if (toFire.length) renderAll();
+    if (toFire.length) {
+      const ring = [];
+      toFire.forEach(item => {
+        notifiedAlarms.add(item.id);
+        if (claimFiredAlarm(item.id, item.alarmAt)) ring.push(item);
+      });
+      ring.forEach(fireAlarm);
+      // One commit for the whole batch: stamps updatedAt once, repaints once,
+      // and keeps saveState() behind its single caller (commit).
+      commit(() => {
+        toFire.forEach(item => { item.alarmAt = null; item.alarmLabel = ''; });
+      });
+    }
     updateAlarmBadges();
     updateAlarmCountdowns();
   } catch (e) { /* guard interval against transient errors */ }
@@ -1759,6 +2014,10 @@ function clearAlarm(id, kind) {
 
 let originalTitle = document.title;
 
+function restoreAlarmTitle() {
+  document.title = originalTitle;
+}
+
 function playAlarmSound() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -1797,22 +2056,32 @@ function fireAlarm(item) {
   playAlarmSound();
   if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 400]);
   document.title = 'ALARM: ' + label;
+  /* Deliver a real notification only if permission was already granted —
+     this path never requests it. Limitation: without a service worker this
+     only fires while the app is open. */
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification('PERSONAL OS — ALARM', { body: `${label} (${kind})`, tag: 'pos-alarm-' + item.id });
+    } catch (e) { /* blocked at OS level — the in-app dialog is the fallback */ }
+  }
+  const alreadyOpen = els.alarmBackdrop && els.alarmBackdrop.classList.contains('is-active');
   if (els.alarmBackdrop && els.alarmTitle && els.alarmItem && els.alarmLabel && els.alarmKind && els.alarmDismiss) {
-    els.alarmTitle.textContent = 'ALARM';
-    els.alarmItem.textContent = item.title || 'UNTITLED';
-    els.alarmLabel.textContent = label;
-    els.alarmKind.textContent = kind;
-    els.alarmKind.className = 'pill';
-    openDialog(els.alarmBackdrop, { focus: els.alarmDismiss });
+    if (!alreadyOpen) {
+      els.alarmTitle.textContent = 'ALARM';
+      els.alarmItem.textContent = item.title || 'UNTITLED';
+      els.alarmLabel.textContent = label;
+      els.alarmKind.textContent = kind;
+      els.alarmKind.className = 'pill';
+      openDialog(els.alarmBackdrop, { focus: els.alarmDismiss, onClose: restoreAlarmTitle });
+    }
   }
   toast('ALARM: ' + label + ' — ' + kind, { duration: 10000 });
 }
 
 if (els.alarmDismiss) {
-  els.alarmDismiss.addEventListener('click', () => {
-    document.title = originalTitle;
-    closeDialog(els.alarmBackdrop);
-  });
+  /* No manual title reset here: closeDialog() fires onClose, which restores
+     the title — so Esc, backdrop clicks and DISMISS all take one path. */
+  els.alarmDismiss.addEventListener('click', () => closeDialog(els.alarmBackdrop));
 }
 
 function downloadICS(item) {
@@ -1836,6 +2105,11 @@ function downloadICS(item) {
     `DTEND:${end}`,
     `SUMMARY:${title}`,
     `DESCRIPTION:${desc}${label ? '\\n' + label : ''}`,
+    'BEGIN:VALARM',
+    'ACTION:DISPLAY',
+    `DESCRIPTION:${label || title}`,
+    'TRIGGER:-PT5M',
+    'END:VALARM',
     'END:VEVENT',
     'END:VCALENDAR',
   ].join('\r\n');

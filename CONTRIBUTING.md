@@ -5,7 +5,10 @@ Thanks for your interest! This is a small vanilla HTML/CSS/JS project with no bu
 ## Getting started
 
 1. Fork the repo and clone it.
-2. Open `index.html` in a browser (or run a local server, e.g. `python -m http.server`).
+2. Serve the folder (e.g. `python3 -m http.server 8000`) and open
+   `http://localhost:8000`. Opening `index.html` directly works for notes,
+   tasks, tags and themes, but Google OAuth rejects `file://` origins, so the
+   sync button cannot complete from a `file://` URL.
 3. Create a branch: `git checkout -b feature/your-change`.
 
 ## Guidelines
