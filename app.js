@@ -1572,18 +1572,18 @@ function buildReportMarkdown(nowTs = Date.now()) {
   md.push(`PERSONAL OS · generated ${toLocalTime(nowTs)} local · produced on this device — nothing was sent anywhere`);
   md.push('');
 
-  md.push('## ✅ DONE TODAY');
+  md.push('## DONE TODAY');
   md.push('(item is DONE and was touched today)');
   if (doneToday.length) doneToday.forEach(t => md.push(`- [task] ${cleanLine(t.title) || 'Untitled'}`));
   else md.push('- (nothing moved to done today)');
   md.push('');
 
-  md.push('## ➕ CREATED TODAY');
+  md.push('## CREATED TODAY');
   if (createdToday.length) createdToday.forEach(i => md.push(`- [${i.kind}] ${cleanLine(i.title) || 'Untitled'} — ${toLocalTime(i.createdAt)}`));
   else md.push('- (nothing created today)');
   md.push('');
 
-  md.push('## 📝 NOTES TOUCHED TODAY');
+  md.push('## NOTES TOUCHED TODAY');
   if (notesTouched.length) {
     notesTouched.forEach(n => {
       md.push(`- ${cleanLine(n.title) || 'UNTITLED'} — ${countWords(n.body)} words${inToday(n.createdAt) ? ' (new)' : ' (edited)'} · ${toLocalTime(n.updatedAt)}`);
@@ -1594,11 +1594,11 @@ function buildReportMarkdown(nowTs = Date.now()) {
   }
   md.push('');
 
-  md.push('## 🏷 TAGS IN PLAY TODAY');
+  md.push('## TAGS IN PLAY TODAY');
   md.push(tagNames.length ? `- ${tagNames.join(' · ')}` : '- (none)');
   md.push('');
 
-  md.push('## ⏰ REMINDERS — TODAY & NEXT 24H');
+  md.push('## REMINDERS — TODAY & NEXT 24H');
   if (upcoming.length) {
     upcoming.forEach(i => {
       const kind = state.notes.includes(i) ? 'note' : 'task';
