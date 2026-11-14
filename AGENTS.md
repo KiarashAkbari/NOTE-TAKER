@@ -1,9 +1,10 @@
 # AGENTS.md
 
 Static, dependency-free web app: `index.html` + `app.js` + `sync.js` +
-`style.css` + `privacy.html`. There is no `package.json`, no build, no bundler,
-no test runner, and no CI. Do not add any of those, and do not introduce a
-framework or npm dependency — see "Non-negotiables".
+`style.css` + `privacy.html`, plus `manifest.json` and `icons/` for PWA
+install. There is no `package.json`, no build, no bundler, no test runner, and
+no CI. Do not add any of those, and do not introduce a framework or npm
+dependency — see "Non-negotiables".
 
 ## Running and verifying
 
@@ -31,9 +32,6 @@ python3 -m http.server 8000   # from the repo root
 
 - Work lands on `v2`; `main` is what GitHub Pages publishes. Do not push to
   `main` without being asked.
-- Git refuses to run here until you add the ownership exception (the checkout
-  is root-owned but the files belong to `ubuntu`):
-  `git -c safe.directory=/root/note-taker <cmd>`.
 
 ## Architecture
 
@@ -67,9 +65,22 @@ Load order is load-bearing. `app.js` must run before `sync.js`.
   split the `&amp;` entity.
 - All state read from storage or Drive goes through `sanitizeState()`, which
   coerces types, regenerates missing ids/timestamps, and prunes tag references
-  that no longer resolve. It also **preserves unknown fields and a higher
-  `version`** so an older browser cannot strip a newer one's data and push the
-  lossy copy back to Drive. Extend `KNOWN_ITEM_FIELDS` when adding fields.
+  that no longer resolve. It also **preserves unknown keys — item-level,
+  `meta`, and state-envelope — plus a higher `version`** so an older browser
+  cannot strip a newer one's data and push the lossy copy back to Drive.
+  Extend `KNOWN_ITEM_FIELDS` when adding item fields.
+- Reminder alarms: `pad` / `toLocalDate` / `toLocalTime` / `timeRemaining` are
+  **module-scope** helpers; renderers, the quick presets, and the alarms bar
+  all call them. `checkAlarms()` ticks once per second, dedups the ring across
+  open tabs through the synchronous `pos-fired-alarms` localStorage marker, and
+  clears fired alarms in a single `commit()` — it never calls `saveState()`
+  directly. `fireAlarm()` hands the `document.title = 'ALARM: …'` reset to the
+  alarm dialog's `onClose`, so Esc, backdrop clicks and DISMISS all restore it.
+- Notification permission is requested only from a user gesture at the
+  reminder UI (`ensureNotificationPermission()`, called by the date/time
+  `change` handlers and the quick-preset buttons). Never request on page load
+  or an unrelated click. There is intentionally no service worker:
+  notifications only exist while the app is open, and privacy.html says so.
 - `openDialog()` / `closeDialog()` maintain `dialogStack` and are guarded
   against double-push; `confirmAction()` rejects a second concurrent call.
   `closeDialog()` blurs focus still inside the closing dialog — otherwise
@@ -108,6 +119,19 @@ These encode past bugs and external requirements. Changing them needs a reason.
   for import and delete-all.
 - **Never lose typed text.** Saving an item that vanished mid-edit (another tab,
   or a Drive pull) re-creates it under its original id and says so.
+- **Reminder helpers stay at module scope.** Renderer-called helpers nested
+  inside another function compile fine and fail at runtime with `ReferenceError`
+  — that exact bug shipped once and took the whole boot path down.
+- **Notification permission only from a user gesture at the reminder UI.**
+  Privacy.html promises this; requesting anywhere else is a regression.
+- **`document.title`'s ALARM flag is restored by the alarm dialog's `onClose`**,
+  never only by the DISMISS button — Esc and backdrop clicks must restore it
+  too.
+- **The CSP meta in index.html / privacy.html pins outbound origins** to
+  `'self'` plus Google's own hosts. `'unsafe-inline'` is required by the inline
+  theme bootstrap — do not remove it without moving the bootstrap out-of-line.
+  Any new external origin needs the CSP, privacy.html, and the consent screen
+  updated together.
 
 ## Conventions
 

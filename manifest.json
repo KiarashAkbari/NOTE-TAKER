@@ -1,9 +1,16 @@
 {
-  "name": "NOTE-TAKER",
-  "short_name": "NoteTaker",
-  "description": "Offline-first note-taking and task tracker web app built with vanilla JavaScript.",
+  "name": "PERSONAL OS — Notes · Tasks · Organize",
+  "short_name": "Personal OS",
+  "description": "Free, local-first notes, tasks and organizer. No accounts, no servers, no tracking. Data stays in your browser; optional Google Drive sync of a hidden app-data file.",
+  "id": "./index.html",
   "start_url": "./index.html",
+  "scope": "./",
   "display": "standalone",
-  "background_color": "#111111",
-  "theme_color": "#111111"
+  "background_color": "#0F0E12",
+  "theme_color": "#0F0E12",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
 }

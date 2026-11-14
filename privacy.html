@@ -2,6 +2,7 @@
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Personal OS — Privacy Policy</title>
 <meta name="color-scheme" content="dark light">
@@ -32,13 +33,13 @@
 <body>
   <a class="back" href="./">&larr; BACK TO APP</a>
   <h1>PERSONAL OS — PRIVACY POLICY</h1>
-  <p>Last updated: September 2026</p>
+  <p>Last updated: November 2026</p>
 
   <h2>WHAT THIS APP IS</h2>
   <p>Personal OS is a single-user note-taking, task-tracking, and organizing tool. It is built and operated by an individual developer for personal use, and made publicly available as open-source code. It is free to use, has no paid tier, and has no company, server, or analytics infrastructure behind it.</p>
 
   <h2>WHAT DATA IS COLLECTED</h2>
-  <p>The app stores the notes, tasks, and tags you create, plus one small preference (your chosen colour theme). This data is:</p>
+  <p>The app stores the notes, tasks, and tags you create. This data is kept in your browser's <strong>local storage</strong>, along with a few small technical keys: your chosen colour theme, the "you are signed in" flag, the short-lived Google access token (if sync is on, kept only until it expires), and a small marker used to avoid ringing the same reminder twice across browser tabs. It is:</p>
   <ul>
     <li>Saved in your browser's local storage on each device by default.</li>
     <li>Optionally, if you choose to sign in with Google, mirrored to a single hidden file in your own Google Drive's "application data" folder — a private storage space that only this app can access, invisible in your normal Drive file list.</li>
@@ -47,6 +48,9 @@
 
   <h2>THIRD-PARTY REQUESTS</h2>
   <p>If you never sign in, the app loads no third-party code and makes no network requests at all. Google's sign-in library is fetched only at the moment you tap SIGN IN, and Google Drive is contacted only while sync is switched on.</p>
+
+  <h2>REMINDERS AND NOTIFICATIONS</h2>
+  <p>Notes and tasks can carry a reminder. Reminders fire in-app (a dialog, a sound, and a title flag) while the app is open. If you set a reminder, the app may ask your browser for notification permission — never on page load or on an unrelated click, only when you engage the reminder controls. If you grant it, due reminders also surface as system notifications while the app is open; nothing is sent anywhere, and no notification content leaves your device. There is no background delivery.</p>
 
   <h2>GOOGLE ACCOUNT ACCESS</h2>
   <p>If you sign in with Google, the app requests exactly one permission scope: <code>drive.appdata</code>. This scope allows the app to read and write only its own hidden data file, and grants no access to any other file in your Google Drive, your Gmail, contacts, or any other Google service.</p>

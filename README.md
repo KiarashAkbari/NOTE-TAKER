@@ -12,7 +12,7 @@ SYSTEM_STATUS:    OPERATIONAL
 SOURCE_OF_TRUTH:  localStorage['personal-os-v1']
 SYNC_LAYER:       GOOGLE_DRIVE_APPDATAFOLDER (OPT-IN)
 BACKEND:          NONE — THERE IS NO SERVER TO TRUST
-PAYLOAD:          5 STATIC FILES · ~29 KB GZIPPED
+PAYLOAD:          5 CORE FILES (+ MANIFEST & PWA ICONS) · ~37 KB GZIPPED
 ```
 
 **[ LIVE_SYSTEM ]** → **https://kiarashakbari.github.io/NOTE-TAKER/** ·
@@ -23,9 +23,10 @@ PAYLOAD:          5 STATIC FILES · ~29 KB GZIPPED
 
 ## // 01_SYSTEM_OVERVIEW
 
-**PERSONAL OS** is a notes, task-board, and tag-organizer app that ships as five
-static files. No framework. No bundler. No `node_modules`. No account. No
-server. Open the page and it works, instantly.
+**PERSONAL OS** is a notes, task-board, tag-organizer, and reminder-alarm app
+that ships as five static files plus a PWA manifest and icons. No framework. No
+bundler. No `node_modules`. No account. No server. Open the page and it works,
+instantly.
 
 Your data lives in your browser. If you want the same data on your phone, you
 tap SIGN IN and it mirrors to a hidden file in **your own** Google Drive. Not a
@@ -45,8 +46,8 @@ files; a local clone needs nothing at all.)
 | Backend services | **0** |
 | Analytics / telemetry / trackers | **0** |
 | Third-party requests before you sign in | **0** |
-| Total source (5 files, uncompressed) | **~105 KB** |
-| Wire weight of the app itself, gzipped | **~29 KB** |
+| Total source (app core, uncompressed) | **~130 KB** |
+| Wire weight of the app itself, gzipped | **~37 KB** |
 | Monthly cost to run | **$0** |
 
 ### [ CORE_CAPABILITIES ]
@@ -70,6 +71,13 @@ files; a local clone needs nothing at all.)
 >
 > **KEYBOARD-COMPLETE:** Create, search, edit, save, and move tasks between
 > columns without touching the mouse.
+>
+> **REMINDERS BUILT IN:** Attach a date/time reminder to any note or task —
+> quick presets (today / tomorrow / week / month), an alarms bar with live
+> countdowns, an in-app alarm dialog with sound, an optional system
+> notification (permission asked only when you touch the reminder controls),
+> and a downloadable `.ics` with a `VALARM` reminder. Alarms survive across
+> tabs without double-ringing.
 >
 > **FORWARD-COMPATIBLE STATE:** An old browser cannot strip a newer schema's
 > fields and push the lossy copy back over your good data.
@@ -119,6 +127,9 @@ Load order is load-bearing: `app.js` owns the data, `sync.js` only mirrors it.
 | Uploads resolve `remoteFileId` before creating | Otherwise a fresh load that pushes early creates a second data file and the two copies diverge. |
 | The multipart boundary is checked against the payload | A note containing the literal boundary would truncate the upload and corrupt the stored file. |
 | Token requests happen **only** on a real user click | Silent renewal is unreliable across browsers and can throw up a full login page unprompted. On expiry the app waits for a tap. |
+| Reminder helpers live at module scope | Renderers, quick-select and the alarms bar all call them; nested once, they compiled fine and threw `ReferenceError` at runtime. |
+| Notification permission is requested only from a user gesture at the reminder UI | Asking on an unrelated first click gets the permission dismissed forever. |
+| Due alarms are re-announced once per browser via a `pos-fired-alarms` marker | Two open tabs run the same 1s ticker; the marker stops a double ring without a backend. |
 
 ---
 
@@ -160,8 +171,14 @@ own origin, register your own OAuth client — see `05_SYNC_PROTOCOL`.
 ### [ VERIFY_A_CHANGE ]
 
 ```bash
-node --check app.js && node --check sync.js   # the whole "test suite"
+node --check app.js && node --check sync.js   # fastest gate
 ```
+
+Scope errors pass `--check`, so for anything touching state or rendering,
+also boot the real page headlessly (see [`AGENTS.md`](AGENTS.md) — the jsdom
+harness lives in a scratch directory, not in this repo). Seed
+`localStorage['personal-os-v1']` with an alarm-armed item and confirm the app
+boots, `window.PersonalOS` exists, and the alarms bar renders.
 
 ---
 
@@ -177,6 +194,33 @@ Title, body, and tags, with a live `WORDS · CHARS` counter in the editor.
 `★ PIN TO TOP` floats a note above the rest; everything else sorts by most
 recently touched. Timestamps read as `JUST NOW`, `12M AGO`, `3D AGO`, then fall
 back to an absolute date.
+
+### [ REMINDERS / ALARMS ]
+
+Every note and task editor has a **REMINDER** section: pick a date and time
+directly, tap a quick preset (`TODAY` / `TOMORROW` / `NEXT WEEK` / `NEXT MONTH`),
+or clear it by emptying the fields. A reminder set on an item shows:
+
+* a countdown badge on its card (`27M`, `3H`, `2D`),
+* a chip in the **alarms bar** under the header — tap it to open the item,
+  or `×` to clear the reminder,
+* when it comes due: an in-app **ALARM** dialog, a short chime, a vibration on
+  phones, a `ALARM:` flag in the tab title (restored when you dismiss it), and —
+  only if you granted notification permission — a system notification.
+
+The **ICS** button next to the reminder fields downloads a calendar file
+(`.ics`) with a `VALARM` trigger 5 minutes before the event, for your
+calendar app of choice.
+
+Notes on scope, honestly stated:
+
+* Permission for notifications is asked **only when you touch the reminder
+  controls** — never on page load, never on an unrelated click. Deny it and
+  everything above except the system notification still works.
+* There is no background delivery (no service worker): an alarm that falls
+  due while the app is closed rings the next time you open it.
+* If you keep two tabs open, only one rings the alarm (a small
+  `pos-fired-alarms` marker coordinates them).
 
 ### [ 02 / TASKS ]
 
@@ -257,11 +301,16 @@ Sync is entirely optional and off until you tap SIGN IN. What it does:
 3. On load with a still-valid cached token, it pulls and compares
    `meta.updatedAt`. Newer side wins.
 4. On every local change, it debounces 1.5s and pushes. A pending push is
-   flushed on `pagehide` so navigating away doesn't drop it.
+   flushed when the tab goes hidden or unloads — best-effort: the browser may
+   cut the request short, so give a burst of edits a second before closing.
 5. If a sync fails and the connection later returns, it retries by itself —
    reusing the token it already has, with no click and no Google auth call.
 6. On expiry it stops and waits for a tap. It will never ambush you with a login
-   screen.
+   screen. A `401` means expired (reconnect); a `403` is shown as `ERROR` — it
+   usually means the Drive API/quota, not your session.
+7. If the app ever finds more than one `personal-os-data.json` in the app
+   folder, it keeps the newest and tells you (once per session) — it never
+   deletes the other automatically.
 
 ### [ STATUS_READOUT ]
 
@@ -301,12 +350,15 @@ access token and talks to Drive REST directly.
 ├── sync.js         # [MIRROR]  Optional Drive layer. Loads AFTER app.js
 ├── style.css       # [TOKENS]  Both theme palettes + every component
 ├── privacy.html    # [LEGAL]   Required by the OAuth consent screen
+├── manifest.json   # [PWA]     Install metadata → icons/
+├── icons/          # [PWA]     192 / 512 (any + maskable) + apple-touch-icon
 ├── AGENTS.md       # Contributor + AI-agent contract (read before editing)
-└── README.md       # This document
+├── README.md       # This document
+└── CONTRIBUTING.md, LICENSE, environment.gif   # docs + license + demo art
 ```
 
-That is the entire application: the first five entries. The last two are
-documentation. There is no `dist/`, no `node_modules/`, no lockfile, no config.
+The application itself is everything above except the last line. There is no
+`dist/`, no `node_modules/`, no lockfile, no build config.
 
 ---
 
@@ -319,10 +371,12 @@ Ground rules for anyone (or anything) sending a patch. Full detail lives in
 | --- | --- |
 | **No npm, no framework, no bundler, no CDN** | Beyond Google's own auth script, nothing is fetched. That promise is the product. |
 | **Free and serverless, permanently** | No backend, no analytics, no paid tier, no runtime dependency. |
-| **All external state goes through `sanitizeState()`** | It coerces types, regenerates missing ids, prunes dangling tag refs, and preserves unknown fields plus a higher `version`. Extend `KNOWN_ITEM_FIELDS` when you add a field. |
+| **All external state goes through `sanitizeState()`** | It coerces types, regenerates missing ids, prunes dangling tag refs, and preserves unknown keys — item-level, `meta`, and state-envelope — plus a higher `version`. Extend `KNOWN_ITEM_FIELDS` when you add a field. |
 | **Colors come only from the per-theme tokens** | Both theme blocks must define the identical token set. Never dim small text with `opacity` — 10px labels at 70% measure ~3:1. |
 | **`privacy.html` makes concrete claims** | If data handling changes, that file changes with it. |
 | **`app.js` and `sync.js` share one lexical scope** | A top-level `const` declared in both is a `SyntaxError` that silently kills sync. |
+| **Reminder helpers stay at module scope** | A renderer must never find `pad` / `toLocalDate` / `toLocalTime` / `timeRemaining` under a sibling function. |
+| **Notification permission only from a user gesture at the reminder UI** | Otherwise the prompt fires with no context and gets denied forever; privacy.html promises it. |
 
 ---
 
@@ -336,6 +390,8 @@ Ground rules for anyone (or anything) sending a patch. Full detail lives in
 >> THIRD_PARTIES:       GOOGLE, ONLY AFTER YOU TAP SIGN IN
 >> OAUTH_SCOPE:         drive.appdata (THIS APP'S HIDDEN FOLDER ONLY)
 >> EXPORT:              PLAIN JSON, ONE CLICK, LOCAL
+>> NOTIFICATIONS:       LOCAL ONLY (APP OPEN), ONLY AFTER YOU GRANT PERMISSION,
+                        ONLY FOR DUE REMINDERS
 >> DELETE:              IN-APP, OR REVOKE ACCESS AT
                         myaccount.google.com/permissions
 ```
@@ -361,10 +417,12 @@ Branch layout: work lands on `v2`; `main` is what GitHub Pages publishes.
 ## // 10_LICENSE_AND_LIABILITY
 
 ```text
->> LICENSE_TYPE:        GNU GPLv3 (COPYLEFT)
->> CLOSED_SOURCE_USE:   PROHIBITED
->> SOURCE_DISCLOSURE:   MANDATORY
+>> LICENSE_TYPE:        MIT (PERMISSIVE)
+>> CLOSED_SOURCE_USE:   PERMITTED
+>> SOURCE_DISCLOSURE:   NOT REQUIRED (ATTRIBUTION APPRECIATED)
 ```
+
+Full text: [`LICENSE`](LICENSE).
 
 **[ NOTICE_OF_NON_LIABILITY ]**
 
